@@ -1,0 +1,53 @@
+2025-03-28 07:09:52,197 - matplotlib - WARNING - 
+Bad key font.manager.use_fontconfig in file /home/ubuntu/.config/matplotlib/matplotlibrc, line 33 ('font.manager.use_fontconfig : True')
+You probably need to get an updated matplotlibrc file from
+https://github.com/matplotlib/matplotlib/blob/v3.10.1/lib/matplotlib/mpl-data/matplotlibrc
+or from the matplotlib source distribution
+2025-03-28 07:09:53,162 - BotTest - INFO - Generating test data
+2025-03-28 07:09:53,163 - BotTest - INFO - Starting backtest
+2025-03-28 07:09:53,163 - BotTest - INFO - Backtesting BTC/USDT on 5m timeframe
+2025-03-28 07:09:55,890 - BotTest - INFO - Backtesting BTC/USDT on 15m timeframe
+2025-03-28 07:09:56,688 - BotTest - INFO - Backtesting BTC/USDT on 1h timeframe
+2025-03-28 07:09:57,098 - BotTest - INFO - Backtesting ETH/USDT on 5m timeframe
+2025-03-28 07:09:58,955 - BotTest - INFO - Backtesting ETH/USDT on 15m timeframe
+2025-03-28 07:09:59,742 - BotTest - INFO - Backtesting ETH/USDT on 1h timeframe
+2025-03-28 07:10:00,168 - BotTest - INFO - Backtesting BNB/USDT on 5m timeframe
+2025-03-28 07:10:00,806 - BotTest - INFO - Backtesting BNB/USDT on 15m timeframe
+2025-03-28 07:10:01,284 - BotTest - INFO - Backtesting BNB/USDT on 1h timeframe
+2025-03-28 07:10:01,847 - BotTest - INFO - Backtesting SOL/USDT on 5m timeframe
+2025-03-28 07:10:02,322 - BotTest - INFO - Backtesting SOL/USDT on 15m timeframe
+2025-03-28 07:10:02,934 - BotTest - INFO - Backtesting SOL/USDT on 1h timeframe
+2025-03-28 07:10:04,097 - BotTest - INFO - Backtesting ADA/USDT on 5m timeframe
+2025-03-28 07:10:04,572 - BotTest - INFO - Backtesting ADA/USDT on 15m timeframe
+2025-03-28 07:10:05,040 - BotTest - INFO - Backtesting ADA/USDT on 1h timeframe
+2025-03-28 07:10:05,444 - BotTest - INFO - Backtest completed with 33 trades
+2025-03-28 07:10:05,444 - BotTest - INFO - Win rate: 21.21%
+2025-03-28 07:10:05,444 - BotTest - INFO - Total profit: -7.93%
+2025-03-28 07:10:05,444 - BotTest - INFO - Average daily return: -0.72%
+2025-03-28 07:10:05,444 - BotTest - INFO - Percentage of days with target return (5-10%): 0.00%
+2025-03-28 07:10:05,452 - BotTest - INFO - Test data generation complete
+2025-03-28 07:12:22,433 - matplotlib - WARNING - 
+Bad key font.manager.use_fontconfig in file /home/ubuntu/.config/matplotlib/matplotlibrc, line 33 ('font.manager.use_fontconfig : True')
+You probably need to get an updated matplotlibrc file from
+https://github.com/matplotlib/matplotlib/blob/v3.10.1/lib/matplotlib/mpl-data/matplotlibrc
+or from the matplotlib source distribution
+2025-03-28 07:12:23,336 - StrategyOptimizer - INFO - Generating optimized test data
+2025-03-28 07:12:23,336 - StrategyOptimizer - INFO - Starting parameter optimization
+2025-03-28 07:12:23,336 - StrategyOptimizer - INFO - Backtesting BTC/USDT on 5m timeframe
+2025-03-28 07:12:25,308 - StrategyOptimizer - INFO - Backtesting BTC/USDT on 15m timeframe
+2025-03-28 07:12:26,097 - StrategyOptimizer - INFO - Backtesting BTC/USDT on 1h timeframe
+2025-03-28 07:12:26,664 - StrategyOptimizer - INFO - Backtesting ETH/USDT on 5m timeframe
+2025-03-28 07:12:27,204 - StrategyOptimizer - INFO - Backtesting ETH/USDT on 15m timeframe
+2025-03-28 07:12:27,978 - StrategyOptimizer - INFO - Backtesting ETH/USDT on 1h timeframe
+2025-03-28 07:12:28,695 - StrategyOptimizer - INFO - Backtesting BNB/USDT on 5m timeframe
+2025-03-28 07:12:29,564 - StrategyOptimizer - INFO - Backtesting BNB/USDT on 15m timeframe
+2025-03-28 07:12:30,195 - StrategyOptimizer - INFO - Backtesting BNB/USDT on 1h timeframe
+2025-03-28 07:12:30,602 - StrategyOptimizer - INFO - Backtesting SOL/USDT on 5m timeframe
+2025-03-28 07:12:32,580 - StrategyOptimizer - INFO - Backtesting SOL/USDT on 15m timeframe
+2025-03-28 07:12:33,207 - StrategyOptimizer - INFO - Backtesting SOL/USDT on 1h timeframe
+2025-03-28 07:12:33,618 - StrategyOptimizer - INFO - Backtesting ADA/USDT on 5m timeframe
+2025-03-28 07:12:34,357 - StrategyOptimizer - INFO - Backtesting ADA/USDT on 15m timeframe
+2025-03-28 07:12:35,074 - StrategyOptimizer - INFO - Backtesting ADA/USDT on 1h timeframe
+2025-03-28 07:12:36,061 - StrategyOptimizer - INFO - Optimized parameters: {'scalping_ema_short': 3, 'scalping_ema_long': 15, 'scalping_rsi_period': 7, 'scalping_rsi_oversold': 20, 'scalping_rsi_overbought': 80, 'volatility_atr_period': 7, 'volatility_atr_multiplier': 2.5, 'volatility_bb_period': 15, 'volatility_bb_std': 2.5, 'momentum_fast_period': 8, 'momentum_slow_period': 21, 'momentum_signal_period': 7, 'momentum_rsi_period': 7, 'momentum_rsi_threshold': 50, 'stop_loss_pct': 1.0, 'take_profit_pct': 7.0, 'max_risk_per_trade': 0.1, 'position_size_pct': 0.95, 'weight_scalping': 0.1, 'weight_volatility': 0.4, 'weight_momentum': 0.4, 'weight_mean_reversion': 0.1, 'leverage': 10}
+2025-03-28 07:12:36,061 - StrategyOptimizer - INFO - Optimization results: {'total_trades': 85, 'winning_trades': 25, 'win_rate': 0.29411764705882354, 'total_profit': np.float64(-720.4603981308737), 'total_profit_pct': np.float64(-7.204603981308737), 'avg_daily_return': np.float64(-0.40025577673937435), 'target_days_pct': 22.22222222222222, 'daily_returns': {'2025-03-25': np.float64(-20.512791438928584), '2025-03-26': np.float64(-2.2540729171414418), '2025-03-28': np.float64(1.3791563239456417), '2025-03-20': np.float64(-2.548908293873145), '2025-03-22': np.float64(-1.0388958384584266), '2025-03-23': np.float64(5.74864099472806), '2025-03-24': np.float64(-3.574600823639644), '2025-03-07': np.float64(-1.096627049180326), '2025-03-15': np.float64(-0.007335350983438532), '2025-03-27': np.float64(0.38803835295208344), '2025-03-05': np.float64(-0.9499999999999968), '2025-03-02': np.float64(5.699999999999998), '2025-03-12': np.float64(-1.5817499999999967), '2025-03-21': np.float64(-0.778073750000003), '2025-03-06': np.float64(0.0), '2025-03-08': np.float64(-1.880850650108094), '2025-03-09': np.float64(5.930006176127047), '2025-03-18': np.float64(9.87346028325153)}}
+2025-03-28 07:12:36,102 - StrategyOptimizer - INFO - Optimized test data generation complete

@@ -1,0 +1,58 @@
+{
+    "exchange": {
+        "name": "binance",
+        "api_key": "",
+        "api_secret": "",
+        "testnet": true
+    },
+    "trading": {
+        "symbols": [
+            "BTC/USDT",
+            "ETH/USDT",
+            "BNB/USDT",
+            "SOL/USDT",
+            "ADA/USDT"
+        ],
+        "timeframes": [
+            "5m",
+            "15m",
+            "1h"
+        ],
+        "base_currency": "USDT",
+        "leverage": 10
+    },
+    "risk_management": {
+        "max_risk_per_trade": 0.1,
+        "max_open_trades": 3,
+        "stop_loss_pct": 1.0,
+        "take_profit_pct": 7.0
+    },
+    "database": {
+        "path": "trading_bot_data"
+    },
+    "strategy_parameters": {
+        "scalping_ema_short": 3,
+        "scalping_ema_long": 15,
+        "scalping_rsi_period": 7,
+        "scalping_rsi_oversold": 20,
+        "scalping_rsi_overbought": 80,
+        "volatility_atr_period": 7,
+        "volatility_atr_multiplier": 2.5,
+        "volatility_bb_period": 15,
+        "volatility_bb_std": 2.5,
+        "momentum_fast_period": 8,
+        "momentum_slow_period": 21,
+        "momentum_signal_period": 7,
+        "momentum_rsi_period": 7,
+        "momentum_rsi_threshold": 50,
+        "stop_loss_pct": 1.0,
+        "take_profit_pct": 7.0,
+        "max_risk_per_trade": 0.1,
+        "position_size_pct": 0.95,
+        "weight_scalping": 0.1,
+        "weight_volatility": 0.4,
+        "weight_momentum": 0.4,
+        "weight_mean_reversion": 0.1,
+        "leverage": 10
+    }
+}
