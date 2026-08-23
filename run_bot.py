@@ -1,191 +1,128 @@
 #!/usr/bin/env python3
+"""JOJO Trading Command Center — launcher.
 
+Boots the trading engine and serves the API, the WebSocket and (when it has
+been built) the voxel world from a single process.
+
+    python run_bot.py                        # paper trading, live market data
+    python run_bot.py --provider simulated   # paper trading, synthetic feed
+    python run_bot.py --mode live            # requires the live-trading gate
+
+The live-trading gate needs all three of:
+  1. ``"live_enabled": true`` under ``trading`` in config.json
+  2. an API key and secret under ``exchange``
+  3. ``LIVE_TRADING_CONFIRM=I_UNDERSTAND_THE_RISK`` in the environment
+Anything less runs the paper matching engine instead.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
 import os
 import sys
-import json
-import logging
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-import time
-import threading
+from pathlib import Path
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("run_bot.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("RunBot")
+REPO_ROOT = Path(__file__).resolve().parent
 
-def main():
-    """
-    Main function to run the crypto trading bot
-    """
-    # Parse command line arguments
-    import argparse
-    parser = argparse.ArgumentParser(description="Crypto Trading Bot")
-    parser.add_argument("--mode", choices=["demo", "optimize", "live"], default="demo", 
-                        help="Bot operation mode: demo (simulated data), optimize (strategy optimization), live (real trading)")
-    parser.add_argument("--config", default="config.json", help="Configuration file path")
-    parser.add_argument("--data-dir", default="trading_bot_data", help="Data directory")
-    parser.add_argument("--dashboard", action="store_true", help="Start dashboard alongside the bot")
-    parser.add_argument("--dashboard-port", type=int, default=8050, help="Dashboard port")
-    args = parser.parse_args()
-    
-    # Create data directory if it doesn't exist
-    os.makedirs(args.data_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.data_dir, "performance"), exist_ok=True)
-    os.makedirs(os.path.join(args.data_dir, "trades"), exist_ok=True)
-    
-    # Import bot modules
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    
-    # Start dashboard if requested
-    dashboard_process = None
-    if args.dashboard:
-        try:
-            import multiprocessing
-            from ui.dashboard import TradingBotDashboard
-            
-            def run_dashboard(data_dir, port):
-                dashboard = TradingBotDashboard(data_dir=data_dir)
-                dashboard.run(port=port)
-            
-            dashboard_process = multiprocessing.Process(
-                target=run_dashboard,
-                args=(args.data_dir, args.dashboard_port)
-            )
-            dashboard_process.start()
-            
-            logger.info(f"Dashboard started at http://localhost:{args.dashboard_port}")
-            print(f"\n✅ Dashboard is running at: http://localhost:{args.dashboard_port}\n")
-        except Exception as e:
-            logger.error(f"Error starting dashboard: {e}")
-            print(f"\n❌ Failed to start dashboard: {e}\n")
-    
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="JOJO Trading Command Center",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--mode", choices=["paper", "live"], default="paper",
+        help="paper runs the simulated matching engine (default); live requires the gate",
+    )
+    parser.add_argument(
+        "--provider", choices=["auto", "binance", "simulated"], default="auto",
+        help="market data source; auto tries Binance and falls back to synthetic",
+    )
+    parser.add_argument("--config", default="config.json", help="configuration file path")
+    parser.add_argument("--host", default=None, help="bind address (default 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=None, help="port (default 8000)")
+    parser.add_argument("--data-dir", default=None, help="directory for the SQLite database")
+    parser.add_argument("--seed", type=int, default=None, help="seed for the synthetic feed")
+    parser.add_argument(
+        "--balance", type=float, default=None, help="starting paper balance",
+    )
+    parser.add_argument(
+        "--log-level", default="info",
+        choices=["critical", "error", "warning", "info", "debug"],
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
+
     try:
-        # Run bot based on mode
-        if args.mode == "demo":
-            logger.info("Starting bot in demo mode")
-            print("\n🚀 Starting crypto trading bot in DEMO mode")
-            print("📊 This mode uses simulated data to demonstrate the bot's capabilities")
-            
-            # Import data generator
-            from ui.data_generator import RealTimeDataUpdater
-            
-            # Start data updater
-            updater = RealTimeDataUpdater(data_dir=args.data_dir)
-            updater.start()
-            
-            print("\n✅ Demo mode activated - generating simulated trading data")
-            print("📈 The bot is now simulating trades targeting 5-10% daily returns")
-            if args.dashboard:
-                print(f"🔍 View the trading dashboard at: http://localhost:{args.dashboard_port}")
-            
-            try:
-                # Keep running until interrupted
-                while True:
-                    time.sleep(1)
-            
-            except KeyboardInterrupt:
-                print("\n⏹️ Stopping demo mode...")
-                updater.stop()
-                print("✅ Demo stopped successfully")
-        
-        elif args.mode == "optimize":
-            logger.info("Starting strategy optimization")
-            print("\n🔧 Starting strategy optimization")
-            print("🧠 This will find the best parameters to achieve 5-10% daily returns")
-            
-            # Import optimizer
-            from bot.strategy_optimizer import StrategyOptimizer
-            
-            # Create optimizer
-            optimizer = StrategyOptimizer(data_dir=args.data_dir)
-            
-            # Run optimization
-            print("\n⏳ Optimization in progress - this may take a few minutes...")
-            results = optimizer.generate_optimized_data()
-            
-            # Print results
-            print("\n✅ Optimization completed!")
-            print("\nResults:")
-            print(f"📊 Total Trades: {results['overall']['total_trades']}")
-            print(f"🎯 Win Rate: {results['overall']['win_rate']:.2%}")
-            print(f"💰 Total Profit: {results['overall']['total_profit_pct']:.2f}%")
-            print(f"📈 Average Daily Return: {results['overall']['avg_daily_return']:.2f}%")
-            print(f"🔍 Days with Target Return (5-10%): {results['overall']['target_days_pct']:.2f}%")
-            
-            # Save configuration
-            config_file = os.path.join(os.path.dirname(args.data_dir), "config.json")
-            print(f"\n💾 Optimized configuration saved to: {config_file}")
-            
-            if args.dashboard:
-                print(f"\n🔍 View the optimization results on the dashboard: http://localhost:{args.dashboard_port}")
-        
-        elif args.mode == "live":
-            logger.info("Starting bot in live trading mode")
-            print("\n🚀 Starting crypto trading bot in LIVE mode")
-            print("⚠️ WARNING: This mode will trade with real funds")
-            
-            # Check if config exists and has API keys
-            config_file = args.config
-            if not os.path.exists(config_file):
-                print("\n❌ Configuration file not found")
-                print(f"Please create a configuration file at: {config_file}")
-                print("See USER_GUIDE.md for configuration instructions")
-                return
-            
-            # Load config
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-            
-            # Check API keys
-            if not config.get("exchange", {}).get("api_key") or not config.get("exchange", {}).get("api_secret"):
-                print("\n❌ API keys not found in configuration")
-                print("Please add your exchange API keys to the configuration file")
-                print("See USER_GUIDE.md for configuration instructions")
-                return
-            
-            # Import bot
-            from bot.final_bot import HighPerformanceTradingBot
-            
-            # Create bot
-            bot = HighPerformanceTradingBot(config_file=config_file, data_dir=args.data_dir)
-            
-            # Start bot
-            print("\n⏳ Starting trading bot...")
-            bot.start()
-            
-            print("\n✅ Trading bot started successfully")
-            print("📈 The bot is now trading to achieve 5-10% daily returns")
-            if args.dashboard:
-                print(f"🔍 Monitor performance on the dashboard: http://localhost:{args.dashboard_port}")
-            
-            try:
-                # Keep running until interrupted
-                while True:
-                    time.sleep(1)
-            
-            except KeyboardInterrupt:
-                print("\n⏹️ Stopping trading bot...")
-                bot.stop()
-                print("✅ Trading bot stopped successfully")
-    
-    except Exception as e:
-        logger.error(f"Error running bot: {e}")
-        print(f"\n❌ Error: {e}")
-    
-    finally:
-        # Stop dashboard if running
-        if dashboard_process and dashboard_process.is_alive():
-            dashboard_process.terminate()
-            dashboard_process.join()
-            logger.info("Dashboard stopped")
+        import uvicorn
+    except ImportError:
+        print(
+            "\n❌ Dependencies are missing. Install them first:\n"
+            "     pip install -r requirements.txt\n",
+            file=sys.stderr,
+        )
+        return 1
+
+    from backend.app import WEB_DIST, create_app
+    from backend.config import load_settings
+
+    overrides: dict[str, object] = {"provider": args.provider}
+    if args.data_dir:
+        overrides["data_dir"] = args.data_dir
+    if args.seed is not None:
+        overrides["seed"] = args.seed
+    if args.balance is not None:
+        overrides["initial_balance"] = args.balance
+    if args.host:
+        overrides["server.host"] = args.host
+    if args.port:
+        overrides["server.port"] = args.port
+    if args.mode == "paper":
+        # An explicit --mode paper must win over whatever config.json says.
+        overrides["trading.live_enabled"] = False
+
+    settings = load_settings(REPO_ROOT / args.config, overrides=overrides)
+
+    allowed, reason = settings.live_gate_status()
+    if args.mode == "live" and not allowed:
+        print(f"\n⚠️  Live trading requested but the gate is closed: {reason}")
+        print("   Continuing in PAPER mode. No real orders will be placed.\n")
+    elif allowed:
+        print("\n" + "=" * 72)
+        print("  ⚠️  LIVE TRADING IS ENABLED — REAL ORDERS WILL BE PLACED")
+        print(f"  exchange: {settings.exchange.name}  testnet: {settings.exchange.testnet}")
+        print("=" * 72 + "\n")
+
+    host = settings.server.host
+    port = settings.server.port
+
+    print("\n🌸 JOJO TRADING COMMAND CENTER")
+    print(f"   execution : {'LIVE' if allowed else 'PAPER'}")
+    print(f"   market    : {settings.provider}")
+    print(f"   bots      : {', '.join(b.name for b in settings.bots)}")
+    print(f"   API       : http://{host}:{port}/api/health")
+    print(f"   WebSocket : ws://{host}:{port}/ws")
+    if WEB_DIST.exists():
+        print(f"   World     : http://{host}:{port}/")
+    else:
+        print("   World     : not built yet — run `cd web && npm install && npm run build`")
+        print("               (or `npm run dev` for the Vite dev server on :5173)")
+    print()
+
+    os.environ.setdefault("JOJO_PROVIDER", settings.provider)
+    uvicorn.run(create_app(settings), host=host, port=port, log_level=args.log_level)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -20,7 +20,7 @@ dist/
 # Test artifacts
 test-results/
 playwright-report/
-screenshots/
+# web/screenshots holds the documentation captures and is tracked.
 
 # Editors / OS
 .DS_Store

@@ -19,13 +19,19 @@
             "1h"
         ],
         "base_currency": "USDT",
-        "leverage": 10
+        "leverage": 10,
+        "live_enabled": false,
+        "fee_rate": 0.0004,
+        "slippage_bps": 2.0
     },
     "risk_management": {
         "max_risk_per_trade": 0.1,
         "max_open_trades": 3,
         "stop_loss_pct": 1.0,
-        "take_profit_pct": 7.0
+        "take_profit_pct": 7.0,
+        "max_portfolio_positions": 0,
+        "max_exposure_pct": 300.0,
+        "drawdown_limit_pct": 25.0
     },
     "database": {
         "path": "trading_bot_data"
@@ -54,5 +60,10 @@
         "weight_momentum": 0.4,
         "weight_mean_reversion": 0.1,
         "leverage": 10
+    },
+    "server": {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "market_tick_hz": 4.0
     }
 }
