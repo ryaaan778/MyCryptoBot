@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Data & logs
+trading_bot_data/
+*.db
+*.sqlite3
+*.log
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# Test artifacts
+test-results/
+playwright-report/
+screenshots/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
