@@ -12,6 +12,13 @@ trading_bot_data/
 *.sqlite3
 *.log
 
+# Research artifacts: datasets are large, reproducible from a seed or a
+# collector run, and checksum-identified — committing them would bloat the repo
+# without making anything more reproducible than the manifest already does.
+data/datasets/
+data/raw/
+data/splits/
+
 # Frontend
 node_modules/
 dist/

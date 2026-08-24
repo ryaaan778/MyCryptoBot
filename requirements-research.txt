@@ -1,0 +1,26 @@
+# Research-only dependencies. Deliberately NOT in requirements.txt.
+#
+# The trading server must keep a light dependency set and must never import
+# torch: a broken CUDA or torch install should not be able to take down a
+# process that is holding positions. Training happens here, exports both an
+# SB3 `model.zip` and a plain `weights.npz`, and the trading path loads the
+# `.npz` and runs a hand-written numpy forward pass.
+#
+# Install separately, and use the CPU wheel — the default pulls ~527MB of CUDA
+# that nothing here uses:
+#
+#   pip install -r requirements-research.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- Phase 1 (already required by requirements.txt, listed for clarity) ---
+numpy>=1.26
+ccxt>=4.2.0
+
+# --- Phase 2+: reinforcement learning ---
+# Gymnasium is the durable asset here: the environment outlives whichever
+# algorithm is fashionable, so it is kept framework-agnostic and SB3 is only
+# the first consumer of it.
+gymnasium>=0.29
+stable-baselines3>=2.3
+torch>=2.2            # CPU build; see the extra-index-url above
+tensorboard>=2.16     # training curves; optional but cheap
