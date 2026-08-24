@@ -69,6 +69,31 @@ rather than hide it. Treat the defaults as untested, and start on paper.
 
 ---
 
+## Research pipeline
+
+The five bots also exist as **research agents** that form hypotheses, train
+reinforcement-learning policies, and evaluate them against baselines out of
+sample. That half of the system is entirely offline — it places no orders, and
+`research/` imports `backend/` but never the reverse.
+
+```bash
+python research.py synth --bars 60000          # deterministic simulated bars
+python research.py baselines --scale 0.25      # every strategy, walk-forward
+python research.py campaign --agent KIRA       # propose -> train -> gate
+python research.py desk --baselines            # JOJO's ranking and allocation
+```
+
+Training needs the isolated extras (`pip install -r requirements-research.txt`);
+everything else runs on the base install. Full write-up, including what the
+baselines actually show, is in **[RESEARCH.md](RESEARCH.md)**.
+
+The short version of the findings so far: on the synthetic tape, **doing nothing
+beats every shipped strategy**, and the 7% take-profit in `config.json` sits
+29 ATR away on a 5-minute chart and fires on 0.00% of trades. Those are
+simulator results and are labelled as such everywhere they appear.
+
+---
+
 ## Architecture
 
 ```
