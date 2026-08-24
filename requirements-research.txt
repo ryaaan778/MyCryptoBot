@@ -24,3 +24,11 @@ gymnasium>=0.29
 stable-baselines3>=2.3
 torch>=2.2            # CPU build; see the extra-index-url above
 tensorboard>=2.16     # training curves; optional but cheap
+
+# --- Phase 6: the optional Claude-backed hypothesis proposer ---
+# Only needed for `research.py ingest --proposer claude`. The offline keyword
+# proposer works without it, so the ingestion pipeline is testable end to end
+# with no API key. An LLM here can emit a hypothesis and nothing else — the
+# response is schema-constrained to an ExperimentSpec.
+anthropic>=0.40
+pydantic>=2.0

@@ -20,6 +20,7 @@ regardless of what the settings say.
     python research.py agents                       # the five research identities
     python research.py campaign --agent KIRA --experiments 5
     python research.py desk                         # JOJO: ranking and allocation
+    python research.py ingest --file article.txt --agent KIRA
 
 ``train``, ``evaluate`` and ``campaign`` need torch and stable-baselines3, which live in
 requirements-research.txt and are deliberately not installed alongside the
@@ -49,6 +50,7 @@ from research.features import FEATURE_SET_VERSION, available_features, build_fea
 from research.metrics import aggregate, summarise
 from research.policy import BASELINE_POLICIES, STRATEGY_POLICIES, make_policy
 from research.agents import AGENT_BIASES, build_agents
+from research.ingest import SourceDocument, make_proposer, record_hypotheses
 from research.jojo import AllocationConfig, JojoManager
 from research.evaluate import (
     GateConfig, compare_to_baselines, evaluate_gate, regime_metrics_across_seeds,
@@ -607,6 +609,53 @@ def cmd_desk(args) -> int:
     return 0
 
 
+def cmd_ingest(args) -> int:
+    """Turn an outside claim into hypotheses. It never becomes a trade."""
+    root = Path(args.root)
+    if args.file:
+        document = SourceDocument.from_file(args.file, title=args.title)
+    elif args.text:
+        document = SourceDocument(title=args.title or "note", text=args.text, origin="note")
+    else:
+        raise SystemExit("give me something to read: --file or --text")
+
+    try:
+        proposer = make_proposer(args.proposer)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    try:
+        proposals = proposer.propose(document, count=args.count, seed=args.seed)
+    except ImportError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    print(f"{document.title}  [{document.origin}]")
+    print(f"sha256 {document.sha256[:16]}  {len(document.text):,} chars"
+          + ("  (truncated for reading)" if document.provenance()["truncated"] else ""))
+    print(f"proposer: {proposer.name}\n")
+
+    if not proposals:
+        print("no hypothesis was produced.")
+        return 0
+
+    for proposal in proposals:
+        print(proposal.describe())
+        print(f"    rationale: {proposal.rationale}")
+        print()
+
+    if args.record:
+        with ExperimentStore(root / "research.db") as store:
+            ids = record_hypotheses(store, args.agent, proposals)
+        print(f"recorded {len(ids)} hypothesis/es for {args.agent} as PROPOSED")
+
+    print("A claim is not evidence. These are experiments to run, not conclusions:")
+    print("each one still has to beat doing-nothing and buy-and-hold out of sample")
+    print("before anybody looks at it again.")
+    return 0
+
+
 def cmd_report(args) -> int:
     root = Path(args.root)
     store = ExperimentStore(root / "research.db")
@@ -787,6 +836,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_backtest_flags(p)
     add_split_flags(p)
     p.set_defaults(func=cmd_desk)
+
+    p = sub.add_parser("ingest", help="turn an outside claim into testable hypotheses")
+    p.add_argument("--file", default=None, help="path to an article, paper or note")
+    p.add_argument("--text", default=None, help="the claim inline, instead of a file")
+    p.add_argument("--title", default=None)
+    p.add_argument("--agent", default="JOLYAN", help="which agent takes the hypothesis")
+    p.add_argument("--proposer", default="keyword", choices=("keyword", "claude"),
+                   help="keyword is offline and deterministic; claude needs an API key")
+    p.add_argument("--count", type=int, default=1)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--record", action="store_true")
+    p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("report", help="leaderboard from recorded results")
     p.add_argument("--dataset", default=None)
