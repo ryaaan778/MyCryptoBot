@@ -673,3 +673,146 @@ tbody tr:hover {
   .roster { width: 210px; }
   .botpanel { width: 280px; }
 }
+
+/* ---- agent research panel -------------------------------------------------
+   Opens over the world; never displaces a trading readout. Closed by default,
+   because research is a slow side channel and the desk's job is trading. */
+
+.research-panel {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  width: min(560px, calc(100vw - 24px));
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  pointer-events: auto;
+  /* Effectively opaque. This is a data panel, and the world showing through it
+     costs legibility for no benefit — the same reason the trading tables are
+     not translucent either. */
+  background: #070911;
+  border: 1px solid rgba(120, 140, 200, 0.35);
+  border-radius: 6px;
+  padding: 12px 14px 14px;
+  font-size: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+
+.research-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.research-panel h2 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  color: #cfd8ff;
+}
+
+.research-panel header button {
+  background: none;
+  border: none;
+  color: #8b93ad;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.research-panel header button:hover { color: #e8ecff; }
+
+/* The provenance banner is the first thing in the panel and is not dismissible:
+   a simulator number mistaken for live evidence is the failure this prevents. */
+.research-banner {
+  margin: 0 0 12px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+.research-banner.synthetic {
+  background: rgba(190, 140, 40, 0.16);
+  border: 1px solid rgba(220, 170, 60, 0.5);
+  color: #f0cf8e;
+}
+
+.research-banner.real {
+  background: rgba(60, 170, 120, 0.14);
+  border: 1px solid rgba(80, 200, 140, 0.45);
+  color: #9de8c4;
+}
+
+.research-empty {
+  margin: 0;
+  color: #8b93ad;
+  line-height: 1.6;
+}
+
+.research-empty code {
+  color: #cfd8ff;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.research-totals {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.research-totals div { text-align: center; }
+
+.research-totals dt {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: #7d85a0;
+  text-transform: uppercase;
+}
+
+.research-totals dd {
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  color: #e8ecff;
+}
+
+.research-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.research-table th {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #7d85a0;
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(120, 140, 200, 0.25);
+}
+
+.research-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #c9d0e6;
+}
+
+.research-table .num { text-align: right; }
+.research-table .champion { color: #9de8c4; }
+.research-table .none { color: #6b7288; }
+.research-table .rejected { color: #b06a6a; font-size: 10px; }
+.research-table .state { color: #8b93ad; font-size: 11px; }
+.research-table tr.busy td { color: #e8ecff; }
+.research-table tr.busy .state { color: #d8b45c; }
+
+.research-footnote {
+  margin: 12px 0 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: #7d85a0;
+}

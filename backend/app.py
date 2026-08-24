@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import REPO_ROOT, Settings, load_settings, to_ccxt_symbol
-from .models import now_ms
+from .models import AgentResearch, ResearchState, now_ms
 from .orchestrator import JojoOrchestrator
 from .store import Store
 
@@ -187,6 +187,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ticker": ticker.model_dump(mode="json") if ticker else None,
         }
 
+    @app.get("/api/research")
+    async def research() -> dict[str, Any]:
+        """The research half of the desk, read-only.
+
+        Returns ``available: false`` when the research pipeline has never run,
+        which is the normal state for a fresh install — the world should show
+        the districts as trading-only rather than inventing empty research
+        panels.
+        """
+        store = state["store"]
+        if store is None:
+            return ResearchState().model_dump(mode="json")
+        names = [bot.name for bot in settings.bots]
+        try:
+            payload = await store.research_state(agents=names)
+        except Exception:
+            # Research is a side channel. A malformed or missing research DB must
+            # never take down the trading API.
+            logger.warning("research state unavailable", exc_info=True)
+            return ResearchState().model_dump(mode="json")
+        return ResearchState(
+            available=payload["available"],
+            agents=[AgentResearch(**row) for row in payload["agents"]],
+            datasets=payload["datasets"], policies=payload["policies"],
+            experiments=payload["experiments"], sources=payload["sources"],
+            synthetic_only=payload["synthetic_only"],
+            paper_capital_deployed=payload["paper_capital_deployed"],
+        ).model_dump(mode="json")
+
     @app.get("/api/audit")
     async def audit(limit: int = Query(200, ge=1, le=1000)) -> Any:
         return await get_store().audit_trail(limit)
@@ -220,6 +249,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "type": "snapshot",
             "data": engine.snapshot().model_dump(mode="json"),
         })
+        # Research standing follows, as its own frame. It is a slow side channel
+        # and must never delay or displace the trading snapshot above, so a
+        # failure here is logged and dropped rather than propagated.
+        try:
+            await ws.send_json({"type": "research", "data": await research()})
+        except Exception:
+            logger.debug("research frame skipped for %s", client, exc_info=True)
 
         async def pump() -> None:
             while True:
@@ -255,6 +291,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if msg_type == "ping":
             await ws.send_json({"type": "pong", "data": {"ts": now_ms()}})
             return
+        if msg_type == "research.request":
+            await ws.send_json({"type": "research", "data": await research()})
+            return
+
         if msg_type == "snapshot.request":
             await ws.send_json({
                 "type": "snapshot", "data": engine.snapshot().model_dump(mode="json")

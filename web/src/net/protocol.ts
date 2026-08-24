@@ -7,6 +7,9 @@
 
 export type BotStatus =
   | 'OFFLINE' | 'IDLE' | 'ANALYZING' | 'TRADING' | 'PAUSED' | 'HALTED'
+  // Research states: the bot is off the desk working on a hypothesis, which the
+  // world shows as visibly different from being idle.
+  | 'RESEARCHING' | 'TRAINING' | 'VALIDATING'
 
 export type RiskLevel = 'SAFE' | 'ELEVATED' | 'HIGH' | 'CRITICAL'
 export type PositionSide = 'LONG' | 'SHORT'
@@ -212,6 +215,46 @@ export interface Snapshot {
 }
 
 /** A frame as it arrives on the socket. */
+/**
+ * One agent's research standing.
+ *
+ * Everything here is *research* status. A promoted champion is a champion
+ * inside the research system and nothing more — it has not been deployed, and
+ * the live-trading gate is untouched by any of it.
+ */
+export interface AgentResearch {
+  agent: string
+  champion_policy: string | null
+  champion_version: number | null
+  challenger_count: number
+  experiments_total: number
+  experiments_rejected: number
+  current_experiment: string | null
+  current_status: string | null
+  hypothesis: string | null
+  paper_allocation: number
+  bias_drift: number
+  last_updated: number
+}
+
+/**
+ * `synthetic_only` is load-bearing rather than decorative. Simulator results
+ * must never be shown as evidence about live markets, and a display surface is
+ * exactly where that mistake gets made — so the flag travels with the numbers
+ * and the panel is expected to say so out loud.
+ */
+export interface ResearchState {
+  available: boolean
+  agents: AgentResearch[]
+  datasets: number
+  policies: number
+  experiments: number
+  sources: string[]
+  synthetic_only: boolean
+  paper_capital_deployed: number
+  updated_at: number
+}
+
 export interface Frame<T = unknown> {
   type: string
   data: T

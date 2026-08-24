@@ -1,6 +1,6 @@
 /** REST client — cold reads, history, and the paths the 2D fallback uses. */
 
-import type { Order, Snapshot, Trade, WorldEvent } from './protocol'
+import type { Order, ResearchState, Snapshot, Trade, WorldEvent } from './protocol'
 
 function base(): string {
   const override = new URLSearchParams(window.location.search).get('backend')
@@ -64,6 +64,7 @@ export const api = {
   events: (limit = 200) => get<WorldEvent[]>(`/api/events?limit=${limit}`),
   equity: (limit = 400) => get<EquityPoint[]>(`/api/equity?limit=${limit}`),
   audit: (limit = 200) => get<AuditEntry[]>(`/api/audit?limit=${limit}`),
+  research: () => get<ResearchState>('/api/research'),
   command: (botId: string, action: string) =>
     post<{ ok: boolean; message: string }>(`/api/bots/${botId}/command`, { action }),
   emergencyStop: () => post<{ ok: boolean }>('/api/system/emergency-stop'),

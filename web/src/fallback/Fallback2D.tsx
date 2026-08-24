@@ -39,6 +39,8 @@ export function Fallback2D({ reason }: { reason: string }) {
   const bots = useBots()
   const emergency = useWorldStore(selectIsEmergency)
   const setRenderMode = useWorldStore((s) => s.setRenderMode)
+  const showResearch = useWorldStore((s) => s.showResearch)
+  const toggleResearch = useWorldStore((s) => s.toggleResearch)
   const events = useWorldStore((s) => s.events)
   const tickers = useWorldStore((s) => s.tickers)
 
@@ -78,6 +80,9 @@ export function Fallback2D({ reason }: { reason: string }) {
             </span>
             <button className="iconbutton" onClick={() => setRenderMode('3d')}>
               TRY 3D WORLD
+            </button>
+            <button className="iconbutton" onClick={toggleResearch}>
+              {showResearch ? 'CLOSE RESEARCH' : 'RESEARCH'}
             </button>
             <button
               className={`button ${emergency ? 'button--go' : 'button--danger'}`}

@@ -1,4 +1,4 @@
-# Research pipeline — Phases 1–6
+# Research pipeline — Phases 1–7
 
 Offline infrastructure for the multi-agent RL work: reproducible datasets,
 causal features, leak-resistant splits, honest metrics, and a backtester that
@@ -571,9 +571,77 @@ never writing a `policy_metrics` row. A test asserts an ingested spec is
 indistinguishable downstream from a generated one. That is the point: an idea
 from an article competes on identical terms and gets no benefit of the doubt.
 
+## Phase 7 — research state in the world
+
+The voxel world shows what the agents are doing, without taking a single pixel
+from the trading data.
+
+### How it reaches the frontend without breaking the dependency rule
+
+`backend` still never imports `research`. It does not have to: the research
+tables' DDL already lives in `backend/store.py`, so the trading server reads
+them directly — read-only, never writing — and serves them at `/api/research`
+plus a `research` WebSocket frame. A test walks every file under `backend/` and
+asserts no `import research` anywhere.
+
+### Research is a side channel, and behaves like one
+
+- The `snapshot` frame goes first; `research` follows as its own frame, and a
+  failure building it is logged and dropped rather than delaying the snapshot.
+- A missing, empty or **corrupt** research database returns an empty state
+  rather than an error — there is a test that drops the `experiments` table,
+  replaces it with nonsense, and asserts `/api/research`, `/api/state` and
+  `/api/health` all still answer. A malformed side channel is a degraded panel,
+  not an outage.
+- A fresh install reports `available: false`, so the world shows trading-only
+  districts instead of inventing empty research panels.
+
+### Three new bot states, with their own hue
+
+`RESEARCHING`, `TRAINING` and `VALIDATING` join the six trading states. They
+share a violet family used nowhere else in the world, so a bot that is off the
+desk working on a hypothesis reads at a glance as something other than idle,
+paused, or trading — in the roster, in the district's status panel, and in the
+character's own glow.
+
+Adding them broke the build, which is the type system doing its job: a
+`Record<BotStatus, string>` colour map cannot silently omit a new state.
+
+### The provenance banner is not dismissible
+
+A display surface is exactly where a simulator number gets mistaken for
+evidence about a live market, so `synthetic_only` travels with the numbers and
+the panel says so as its first element:
+
+```
+┌ AGENT RESEARCH ─────────────────────────────────────────────────┐
+│ SYNTHETIC — simulator output. Not evidence about live markets.  │
+│  DATASETS 1   EXPERIMENTS 5   POLICIES 27   PAPER DEPLOYED $0   │
+│  AGENT     CHAMPION  CHAL.  EXP.       PAPER  STATE             │
+│  JONATHAN  —             6  2 (2 rej)     $0  last hyp. rejected│
+│  KIRA      —             6  3 (2 rej)     $0  proposed          │
+│  Promotion here is a research status. Nothing reaches live       │
+│  trading without the three-part gate and explicit approval.      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+The default `ResearchState()` is `synthetic_only: true` — the cautious
+assumption until real venue data says otherwise.
+
+### A bug found by running it rather than reading it
+
+The panel was first mounted inside `<Hud>`, which only renders in 3D mode. The
+2D fallback runs on the machines least able to render the world — so the panel
+was unreachable for exactly the users who cannot reach the 3D HUD. It is now
+mounted above the render-mode branch, with its own toggle in the 2D control row.
+
+Verified against the live server with the real research database: the panel
+renders in fallback mode with all five agents, correct counts, and no console
+errors.
+
 ## Tests
 
-`pytest` — 467 tests, of which 362 are new:
+`pytest` — 481 tests, of which 376 are new:
 
 - `test_research_leakage.py` — feature causality, regime threshold causality,
   backtest look-ahead, scaler fitting
@@ -597,6 +665,9 @@ from an article competes on identical terms and gets no benefit of the doubt.
   engine
 - `test_research_ingest.py` — provenance, risk clamping, prompt-injection
   containment, and the import-graph proof that ingestion cannot reach execution
+- `test_research_api.py` — the research endpoint and WS frame, the
+  synthetic-only flag, and that a corrupt research database cannot take the
+  trading API down
 
 The original 105 backend tests are unchanged and green.
 

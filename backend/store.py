@@ -411,6 +411,96 @@ class Store:
         )
         return list(reversed(rows))
 
+    # ---- research (read-only) ----------------------------------------------
+    #
+    # The trading server reads the research tables and never writes them. It
+    # also does not import anything from ``research`` — the DDL lives in this
+    # module precisely so this side can read the desk's research standing
+    # without inverting the dependency. If the research pipeline has never run,
+    # every query below simply returns nothing.
+
+    async def research_state(self, agents: list[str] | None = None) -> dict[str, Any]:
+        """A display-ready summary of the research half of the desk."""
+        counts = {}
+        for table in ("datasets", "policies", "experiments"):
+            rows = await self._fetch(f"SELECT COUNT(*) AS c FROM {table}")
+            counts[table] = int(rows[0]["c"]) if rows else 0
+
+        sources = [
+            row["source"] for row in await self._fetch(
+                "SELECT DISTINCT source FROM datasets ORDER BY source")
+        ]
+        allocations = await self._fetch(
+            """SELECT a.agent, a.paper_capital FROM allocations a
+               JOIN (SELECT agent, MAX(ts) AS ts FROM allocations GROUP BY agent) latest
+                 ON a.agent = latest.agent AND a.ts = latest.ts"""
+        )
+        deployed = float(sum(row["paper_capital"] for row in allocations))
+
+        names = agents or [row["agent"] for row in await self._fetch(
+            "SELECT DISTINCT agent FROM experiments ORDER BY agent")]
+        return {
+            "available": counts["experiments"] > 0 or counts["policies"] > 0,
+            "agents": [await self.agent_research(name) for name in names],
+            "datasets": counts["datasets"],
+            "policies": counts["policies"],
+            "experiments": counts["experiments"],
+            "sources": sources,
+            # Anything other than a pure-SYNTHETIC set means real-market data is
+            # present; until then the interface must say so.
+            "synthetic_only": all(s == "SYNTHETIC" for s in sources) if sources else True,
+            "paper_capital_deployed": deployed,
+        }
+
+    async def agent_research(self, agent: str) -> dict[str, Any]:
+        experiments = await self._fetch(
+            "SELECT status, COUNT(*) AS c FROM experiments WHERE agent = ? GROUP BY status",
+            (agent,),
+        )
+        by_status = {row["status"]: int(row["c"]) for row in experiments}
+
+        latest = await self._fetch(
+            """SELECT experiment_id, status, hypothesis, updated_at FROM experiments
+               WHERE agent = ? ORDER BY updated_at DESC LIMIT 1""",
+            (agent,),
+        )
+        current = latest[0] if latest else None
+
+        champion = await self._fetch(
+            """SELECT policy_id, action FROM champion_history
+               WHERE agent = ? ORDER BY ts DESC, id DESC LIMIT 1""",
+            (agent,),
+        )
+        champion_policy = None
+        champion_version = None
+        if champion and champion[0]["action"] == "PROMOTED":
+            champion_policy = champion[0]["policy_id"]
+            version = await self._fetch(
+                "SELECT version FROM policies WHERE policy_id = ?", (champion_policy,))
+            champion_version = int(version[0]["version"]) if version else None
+
+        challengers = await self._fetch(
+            "SELECT COUNT(*) AS c FROM policies WHERE agent = ? AND policy_id != ?",
+            (agent, champion_policy or ""),
+        )
+        allocation = await self._fetch(
+            "SELECT paper_capital FROM allocations WHERE agent = ? ORDER BY ts DESC LIMIT 1",
+            (agent,),
+        )
+        return {
+            "agent": agent,
+            "champion_policy": champion_policy,
+            "champion_version": champion_version,
+            "challenger_count": int(challengers[0]["c"]) if challengers else 0,
+            "experiments_total": sum(by_status.values()),
+            "experiments_rejected": by_status.get("REJECTED", 0),
+            "current_experiment": current["experiment_id"] if current else None,
+            "current_status": current["status"] if current else None,
+            "hypothesis": current["hypothesis"] if current else None,
+            "paper_allocation": float(allocation[0]["paper_capital"]) if allocation else 0.0,
+            "last_updated": int(current["updated_at"]) if current else 0,
+        }
+
     async def audit_trail(self, limit: int = 200) -> list[dict[str, Any]]:
         rows = await self._fetch("SELECT * FROM audit_log ORDER BY seq DESC LIMIT ?", (limit,))
         for row in rows:

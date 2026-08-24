@@ -10,6 +10,7 @@ import { useWorldStore } from './state/store'
 import { World } from './world/World'
 import { Hud } from './hud/Hud'
 import { Fallback2D } from './fallback/Fallback2D'
+import { ResearchPanel } from './hud/ResearchPanel'
 import { detectWebGL, forcedRenderMode, initialQuality } from './perf/quality'
 import './hud/hud.css'
 
@@ -81,6 +82,12 @@ export function App() {
       ) : (
         <Fallback2D reason={fallbackReason} />
       )}
+
+      {/* Outside the render-mode branch on purpose. The 2D fallback runs on the
+          machines least able to render the world, and those users need the
+          research standing just as much — gating it on the 3D HUD would hide it
+          from exactly the people who cannot reach the 3D HUD. */}
+      <ResearchPanel />
 
       {booting && (
         <div className="loading">

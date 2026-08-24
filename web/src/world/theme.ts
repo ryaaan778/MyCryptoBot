@@ -28,6 +28,11 @@ export const THEME = {
   royal: '#8b2f8f',
   night: '#1a1026',
   hologram: '#4fd6ff',
+  // Research states get their own hue family — violet, unused elsewhere — so a
+  // bot that is off the desk working on a hypothesis reads at a glance as
+  // something other than idle, paused, or trading.
+  research: '#a17bff',
+  researchDeep: '#6f4fd8',
   profit: '#3ddc84',
   loss: '#ff5468',
   warning: '#ffb020',

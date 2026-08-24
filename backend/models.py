@@ -66,6 +66,12 @@ class BotStatus(str, Enum):
     TRADING = "TRADING"
     PAUSED = "PAUSED"
     HALTED = "HALTED"
+    # Research states. A bot in one of these is not trading — it is off the desk
+    # working on a hypothesis, which the world should show as visibly different
+    # from being idle.
+    RESEARCHING = "RESEARCHING"
+    TRAINING = "TRAINING"
+    VALIDATING = "VALIDATING"
 
 
 class RiskLevel(str, Enum):
@@ -277,6 +283,52 @@ class BotState(BaseModel):
     last_heartbeat: int = 0
     error: str | None = None
     persona: BotPersona = Field(default_factory=BotPersona)
+
+
+class AgentResearch(BaseModel):
+    """One agent's research standing, read from the research tables.
+
+    Everything here is *research* status. A promoted champion is a champion
+    inside the research system and nothing more — it has not been deployed, and
+    the live-trading gate is untouched by anything in this model.
+    """
+
+    agent: str
+    champion_policy: str | None = None
+    champion_version: int | None = None
+    challenger_count: int = 0
+    experiments_total: int = 0
+    experiments_rejected: int = 0
+    current_experiment: str | None = None
+    current_status: str | None = None
+    hypothesis: str | None = None
+    paper_allocation: float = 0.0
+    bias_drift: float = 0.0
+    last_updated: int = 0
+
+    @property
+    def is_busy(self) -> bool:
+        return self.current_status in {"PROPOSED", "TRAINING", "VALIDATING"}
+
+
+class ResearchState(BaseModel):
+    """The research half of the desk, for display.
+
+    ``synthetic_only`` is load-bearing rather than decorative. Simulator results
+    must never be presented as evidence about live markets, and the surface that
+    shows them is exactly where that mistake would be made — so the flag travels
+    with the numbers and the interface is expected to say so out loud.
+    """
+
+    available: bool = False
+    agents: list[AgentResearch] = Field(default_factory=list)
+    datasets: int = 0
+    policies: int = 0
+    experiments: int = 0
+    sources: list[str] = Field(default_factory=list)
+    synthetic_only: bool = True
+    paper_capital_deployed: float = 0.0
+    updated_at: int = Field(default_factory=now_ms)
 
 
 class RiskState(BaseModel):

@@ -87,6 +87,8 @@ function TopBar() {
   const emergency = useWorldStore(selectIsEmergency)
   const toggleTables = useWorldStore((s) => s.toggleTables)
   const showTables = useWorldStore((s) => s.showTables)
+  const showResearch = useWorldStore((s) => s.showResearch)
+  const toggleResearch = useWorldStore((s) => s.toggleResearch)
   const setRenderMode = useWorldStore((s) => s.setRenderMode)
   const renderMode = useWorldStore((s) => s.renderMode)
 
@@ -159,6 +161,9 @@ function TopBar() {
           <button className="iconbutton" onClick={toggleTables}>
             {showTables ? 'CLOSE TABLES' : 'DATA TABLES'}
           </button>
+          <button className="iconbutton" onClick={toggleResearch}>
+            {showResearch ? 'CLOSE RESEARCH' : 'RESEARCH'}
+          </button>
           <button
             className="iconbutton"
             onClick={() => setRenderMode(renderMode === '3d' ? '2d' : '3d')}
@@ -194,6 +199,11 @@ const STATUS_COLOR: Record<BotState['status'], string> = {
   PAUSED: '#9aa4bb',
   OFFLINE: '#5b6478',
   HALTED: THEME.critical,
+  // Research states share a hue so they read as one family, and are distinct
+  // from every trading state so the two are never confused at a glance.
+  RESEARCHING: THEME.research,
+  TRAINING: THEME.research,
+  VALIDATING: THEME.researchDeep,
 }
 
 function BotRoster() {

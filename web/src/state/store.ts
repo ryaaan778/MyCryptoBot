@@ -26,6 +26,7 @@ import type {
   Ticker,
   Trade,
   WorldEvent,
+  ResearchState,
 } from '../net/protocol'
 import { pushEffect } from '../fx/effectQueue'
 
@@ -51,11 +52,13 @@ export interface WorldStore {
   events: WorldEvent[]
   tickers: Record<string, Ticker>
   candles: Record<string, Candle[]>
+  research: ResearchState | null
 
   selectedBot: string | null
   cameraTarget: string
   showTables: boolean
   showHelp: boolean
+  showResearch: boolean
   renderMode: RenderMode
   quality: Quality
   lastError: string | null
@@ -67,6 +70,8 @@ export interface WorldStore {
   focusCamera: (target: string) => void
   toggleTables: () => void
   toggleHelp: () => void
+  toggleResearch: () => void
+  setResearch: (research: ResearchState) => void
   setRenderMode: (mode: RenderMode) => void
   setQuality: (quality: Quality) => void
 }
@@ -90,10 +95,12 @@ export const useWorldStore = create<WorldStore>((set, get) => ({
   events: [],
   tickers: {},
   candles: {},
+  research: null,
 
   selectedBot: null,
   cameraTarget: 'WORLD',
   showTables: false,
+  showResearch: false,
   showHelp: false,
   renderMode: '3d',
   quality: 'high',
@@ -319,6 +326,13 @@ export const useWorldStore = create<WorldStore>((set, get) => ({
         return
       }
 
+      case 'research': {
+        // A slow side channel. It arrives once on connect and on request, and
+        // must never interfere with the lifecycle frames above.
+        set({ research: data as ResearchState })
+        break
+      }
+
       case 'error': {
         set({ lastError: (data as { message: string }).message })
         return
@@ -336,6 +350,8 @@ export const useWorldStore = create<WorldStore>((set, get) => ({
   focusCamera: (cameraTarget) => set({ cameraTarget }),
   toggleTables: () => set((s) => ({ showTables: !s.showTables })),
   toggleHelp: () => set((s) => ({ showHelp: !s.showHelp })),
+  toggleResearch: () => set((s) => ({ showResearch: !s.showResearch })),
+  setResearch: (research) => set({ research }),
   setRenderMode: (renderMode) => set({ renderMode }),
   setQuality: (quality) => set({ quality }),
 }))
