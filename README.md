@@ -19,12 +19,20 @@ inside the world.
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
-
-cd web && npm install && npm run build && cd ..
-
-python run_bot.py --provider simulated
+python start.py
 # → http://localhost:8000
+```
+
+`start.py` checks the Python dependencies, builds the voxel world if it has not
+been built, and starts the desk. It prints every step before taking it. If Node
+is missing it says so and starts the API anyway rather than refusing.
+
+By hand, it is these three steps:
+
+```bash
+pip install -r requirements.txt
+cd web && npm install && npm run build && cd ..
+python run_bot.py --provider simulated
 ```
 
 `--provider simulated` runs against a synthetic market feed, which is the
