@@ -103,6 +103,141 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
 """
 
+#: Tables for the offline research pipeline. Kept in this module — rather than
+#: under ``research/`` — because ``research`` imports ``backend`` and never the
+#: reverse; putting the DDL here lets the research store share this database
+#: without inverting that dependency. Purely additive: the six tables above are
+#: untouched, and the trading server neither reads nor writes any table below.
+#:
+#: The load-bearing constraint is ``policy_metrics.dataset_id`` referencing
+#: ``datasets``. There is no path to a metric that does not name the dataset it
+#: came from, and therefore none to a metric whose data source is unknown — so a
+#: synthetic result cannot be reported as real-market evidence by omission.
+RESEARCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS datasets (
+    dataset_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,              -- 'SYNTHETIC' or a ccxt exchange id
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    collector_version TEXT NOT NULL,
+    seed INTEGER,
+    gaps INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_datasets_source ON datasets(source, symbol, timeframe);
+
+CREATE TABLE IF NOT EXISTS experiments (
+    experiment_id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL,
+    hypothesis TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    status TEXT NOT NULL,              -- PROPOSED|TRAINING|VALIDATING|REJECTED|CANDIDATE|...
+    seed INTEGER,
+    parent_experiment_id TEXT,
+    decision_reason TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (parent_experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_experiments_agent ON experiments(agent, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(status);
+
+CREATE TABLE IF NOT EXISTS policies (
+    policy_id TEXT PRIMARY KEY,
+    agent TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    kind TEXT NOT NULL,                -- 'strategy' | 'baseline' | 'learned'
+    algo TEXT,
+    experiment_id TEXT,
+    hyperparams_json TEXT,
+    feature_set TEXT,
+    feature_set_version TEXT,
+    reward_version TEXT,
+    seed INTEGER,
+    model_path TEXT,
+    weights_path TEXT,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (agent, version),
+    FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent, version DESC);
+
+-- Long format: one row per (policy, dataset, split, window, regime, seed, metric).
+CREATE TABLE IF NOT EXISTS policy_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    split_id TEXT,
+    window INTEGER,
+    regime TEXT,
+    seed INTEGER,
+    metric TEXT NOT NULL,
+    value REAL NOT NULL,
+    metrics_version TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id),
+    FOREIGN KEY (dataset_id) REFERENCES datasets(dataset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_metrics_lookup
+    ON policy_metrics(policy_id, dataset_id, metric);
+CREATE INDEX IF NOT EXISTS idx_metrics_metric ON policy_metrics(metric, value);
+
+CREATE TABLE IF NOT EXISTS evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    split_id TEXT,
+    stage TEXT NOT NULL,               -- WALK_FORWARD | HOLDOUT | PAPER | SHADOW
+    passed INTEGER NOT NULL,
+    gate_json TEXT NOT NULL,           -- each gate condition and whether it held
+    reason TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id),
+    FOREIGN KEY (dataset_id) REFERENCES datasets(dataset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluations_policy ON evaluations(policy_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    kind TEXT NOT NULL,                -- HYPOTHESIS | OUTCOME | LESSON | DEAD_END
+    content_json TEXT NOT NULL,
+    experiment_id TEXT,
+    policy_id TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_agent ON agent_memory(agent, kind, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS champion_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    action TEXT NOT NULL,              -- PROMOTED | RETIRED
+    reason TEXT NOT NULL,
+    previous_policy_id TEXT,
+    ts INTEGER NOT NULL,
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_champion_agent ON champion_history(agent, ts DESC);
+
+CREATE TABLE IF NOT EXISTS allocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    policy_id TEXT,
+    paper_capital REAL NOT NULL,
+    reason TEXT NOT NULL,
+    ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_allocations_agent ON allocations(agent, ts DESC);
+"""
+
 
 class Store:
     def __init__(self, data_dir: str | Path, filename: str = "jojo.db") -> None:
@@ -118,6 +253,9 @@ class Store:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        # Additive only: research tables are created so the two halves share one
+        # database file. The trading loop never touches them.
+        await self._db.executescript(RESEARCH_SCHEMA)
         await self._db.commit()
         self._task = asyncio.create_task(self._writer(), name="store-writer")
         logger.info("store open at %s", self.path)
