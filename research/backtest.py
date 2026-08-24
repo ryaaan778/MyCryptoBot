@@ -161,6 +161,268 @@ def _settings_for(config: BacktestConfig, base: Settings | None = None) -> Setti
     return settings
 
 
+@dataclass
+class StepOutcome:
+    """What one bar did. Returned by :meth:`Simulator.step`."""
+
+    index: int
+    equity: float
+    equity_before: float
+    account: AccountState
+    opened: bool = False
+    closed: TradeRecord | None = None
+    blocked: str | None = None
+    drawdown_pct: float = 0.0
+    drawdown_before: float = 0.0
+
+    @property
+    def log_return(self) -> float:
+        if self.equity_before <= 1e-12 or self.equity <= 1e-12:
+            return 0.0
+        return float(np.log(self.equity / self.equity_before))
+
+    @property
+    def position_changed(self) -> bool:
+        return self.opened or self.closed is not None
+
+
+class Simulator:
+    """The bar protocol, owned in one place.
+
+    Both :func:`run_backtest` and the reinforcement-learning environment drive
+    this object, and that is deliberate rather than tidy: if the environment had
+    its own copy of the fill and exit logic, a policy would be trained against
+    one set of mechanics and evaluated against another, and the gap between the
+    two would look exactly like an edge. Keeping a single implementation means a
+    learned policy and a hand-written strategy are measured by the same rules.
+
+    Usage is a loop:
+
+        sim = Simulator(dataset, config)
+        sim.reset()
+        while not sim.done:
+            action = decide(sim.account)
+            sim.step(action)
+        sim.finish()
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        config: BacktestConfig | None = None,
+        *,
+        settings: Settings | None = None,
+        start: int = 0,
+        stop: int | None = None,
+        label: str = "policy",
+    ) -> None:
+        self.dataset = dataset
+        self.config = config or BacktestConfig()
+        self.config.validate()
+        self.start = max(0, start)
+        self.stop = len(dataset) if stop is None else min(stop, len(dataset))
+        if self.stop - self.start < 2:
+            raise ValueError(f"need at least 2 bars, got {self.stop - self.start}")
+        self.label = label
+        self.symbol = dataset.manifest.symbol
+        self._settings = _settings_for(self.config, settings)
+        self.reset()
+
+    # ---- lifecycle ---------------------------------------------------------
+
+    def reset(self) -> AccountState:
+        cfg = self.config
+        self.portfolio = Portfolio(cfg.starting_equity)
+        self.risk = RiskEngine(self._settings, self.portfolio)
+        self.execution = PaperExecution(self._settings, bus=None)
+        self.bot = BotConfig(
+            id="research", name="research", strategy=self.label,
+            symbol=self.symbol, timeframe=self.dataset.manifest.timeframe,
+            allocation=1.0, leverage=cfg.leverage, max_positions=1,
+            risk_per_trade=cfg.risk_per_trade,
+            stop_loss_pct=cfg.stop_loss_pct if cfg.stop_loss_pct is not None else 0.0,
+            take_profit_pct=cfg.take_profit_pct if cfg.take_profit_pct is not None else 0.0,
+        )
+
+        self.bars = self.stop - self.start
+        self.equity_curve = np.empty(self.bars, dtype=np.float64)
+        self.actions = np.zeros(self.bars, dtype=np.int8)
+        self.trades: list[TradeRecord] = []
+        self.block_reasons: dict[str, int] = {}
+        self.slippage_cost = 0.0
+        self.exposure_bars = 0
+
+        self.index = self.start
+        self._entry_index: int | None = None
+        self._bars_in_position = 0
+        self._bars_since_trade = 0
+        self._trades_taken = 0
+        self._finished = False
+        self._drawdown = 0.0
+
+        # Bar `start` has no prior decision to execute and no position to stop
+        # out, so it is only marked. Everything after it goes through `step`.
+        self._mark()
+        self.account = self._account_state()
+        return self.account
+
+    @property
+    def offset(self) -> int:
+        return self.index - self.start
+
+    @property
+    def done(self) -> bool:
+        """True on the final bar: its decision would have nowhere to execute."""
+        return self.index >= self.stop - 1
+
+    @property
+    def position(self):
+        return next(iter(self.portfolio.positions.values()), None)
+
+    def record_action(self, action: PolicyAction) -> None:
+        self.actions[self.offset] = int(action)
+
+    # ---- one bar -----------------------------------------------------------
+
+    def step(self, action: PolicyAction) -> StepOutcome:
+        """Advance one bar, executing ``action`` at the next bar's open."""
+        if self.done:
+            raise RuntimeError("simulator is at the final bar; call finish()")
+
+        equity_before = float(self.portfolio.equity)
+        drawdown_before = self._drawdown
+        self.index += 1
+        i = self.index
+        cfg = self.config
+
+        # 1. the decision made on the previous bar fills at this bar's open
+        position, self._entry_index, opened, slip = _apply(
+            action, self.dataset, i, self.portfolio, self.risk, self.execution,
+            self.bot, cfg, self.symbol, self.position, self._entry_index,
+            self.trades, self.block_reasons,
+        )
+        self.slippage_cost += slip
+        blocked = None
+        if not opened and action in (PolicyAction.LONG, PolicyAction.SHORT) and position is None:
+            blocked = next(reversed(self.block_reasons), None) if self.block_reasons else None
+        if opened:
+            self._trades_taken += 1
+            self._bars_in_position = 0
+            self._bars_since_trade = 0
+
+        # 2. stops and targets against this bar's range; the stop wins ties
+        closed = self._check_protective_exit()
+
+        # 3. mark to this bar's close
+        self._mark()
+        self.account = self._account_state()
+
+        return StepOutcome(
+            index=i, equity=float(self.portfolio.equity), equity_before=equity_before,
+            account=self.account, opened=opened, closed=closed, blocked=blocked,
+            drawdown_pct=self._drawdown, drawdown_before=drawdown_before,
+        )
+
+    def finish(self) -> None:
+        """Close anything still open so the equity curve ends realised."""
+        if self._finished:
+            return
+        self._finished = True
+        position = self.position
+        if position is None or not self.config.close_at_end:
+            return
+
+        last = self.stop - 1
+        reference = float(self.dataset.close[last])
+        side = Side.SELL if position.side is PositionSide.LONG else Side.BUY
+        price = self.execution.fill_price(
+            side, _ticker(self.symbol, reference, self.config.spread_bps))
+        self.slippage_cost += abs(price - reference) * position.quantity
+        fee = self.execution.fee_for(price, position.quantity)
+        entry_fee = position.fees_paid
+        trade = self.portfolio.close_position(
+            position,
+            Fill(order_id="bt", price=price, quantity=position.quantity, fee=fee),
+            reason=CloseReason.MANUAL,
+        )
+        self.trades.append(_record(trade, self._entry_index or last, last,
+                                   CloseReason.MANUAL, entry_fee,
+                                   override=ExitReason.END_OF_DATA))
+        self.equity_curve[-1] = self.portfolio.equity
+
+    # ---- internals ---------------------------------------------------------
+
+    def _check_protective_exit(self) -> TradeRecord | None:
+        position = self.position
+        if position is None:
+            return None
+        exit_ref, reason = _triggered_exit(position, self.dataset, self.index)
+        if exit_ref is None:
+            return None
+
+        side = Side.SELL if position.side is PositionSide.LONG else Side.BUY
+        price = self.execution.fill_price(
+            side, _ticker(self.symbol, exit_ref, self.config.spread_bps))
+        self.slippage_cost += abs(price - exit_ref) * position.quantity
+        fee = self.execution.fee_for(price, position.quantity)
+        entry_fee = position.fees_paid
+        trade = self.portfolio.close_position(
+            position, Fill(order_id="bt", price=price, quantity=position.quantity, fee=fee),
+            reason=reason,
+        )
+        record = _record(trade, self._entry_index or self.index, self.index, reason, entry_fee)
+        self.trades.append(record)
+        self._entry_index = None
+        self._bars_since_trade = 0
+        return record
+
+    def _mark(self) -> None:
+        close = float(self.dataset.close[self.index])
+        self.portfolio.mark(self.symbol, close)
+        self.equity_curve[self.offset] = self.portfolio.equity
+        if self.portfolio.positions:
+            self.exposure_bars += 1
+            self._bars_in_position += 1
+        else:
+            self._bars_in_position = 0
+        self._bars_since_trade += 1
+        self._drawdown = float(self.portfolio.drawdown_pct)
+
+    def _account_state(self) -> AccountState:
+        return _account_state(
+            self.portfolio, self.position, float(self.dataset.close[self.index]),
+            self.config, self._bars_in_position, self._bars_since_trade, self._trades_taken,
+        )
+
+    def context(self, features: np.ndarray | None = None) -> PolicyContext:
+        return PolicyContext(dataset=self.dataset, index=self.index,
+                             account=self.account, bot_id="research", features=features)
+
+    # ---- output ------------------------------------------------------------
+
+    def result(self, *, seed: int | None = None, window: int | None = None) -> BacktestResult:
+        ts = self.dataset.ts[self.start:self.stop]
+        metrics = compute_metrics(
+            self.equity_curve, ts, self.trades,
+            bars_per_year=self.dataset.bars_per_day * 365.0,
+            exposure_bars=self.exposure_bars,
+            slippage_cost=self.slippage_cost,
+        )
+        return BacktestResult(
+            policy=self.label,
+            dataset_id=self.dataset.manifest.dataset_id,
+            dataset_source=self.dataset.manifest.source,
+            symbol=self.symbol,
+            timeframe=self.dataset.manifest.timeframe,
+            start_index=self.start, stop_index=self.stop,
+            ts=ts, equity=self.equity_curve, trades=self.trades, metrics=metrics,
+            actions=self.actions,
+            blocked_by_risk=sum(self.block_reasons.values()),
+            block_reasons=self.block_reasons,
+            slippage_cost=self.slippage_cost, seed=seed, window=window,
+        )
+
+
 def run_backtest(
     policy: BasePolicy,
     dataset: Dataset,
@@ -173,136 +435,19 @@ def run_backtest(
     window: int | None = None,
 ) -> BacktestResult:
     """Run ``policy`` over ``dataset[start:stop]`` and return equity, trades, metrics."""
-    cfg = config or BacktestConfig()
-    cfg.validate()
-    stop = len(dataset) if stop is None else min(stop, len(dataset))
-    if stop - start < 2:
-        raise ValueError(f"need at least 2 bars, got {stop - start}")
-
-    resolved = _settings_for(cfg, settings)
-    portfolio = Portfolio(cfg.starting_equity)
-    risk = RiskEngine(resolved, portfolio)
-    execution = PaperExecution(resolved, bus=None)
-
-    bot = BotConfig(
-        id="research", name="research", strategy=policy.name,
-        symbol=dataset.manifest.symbol, timeframe=dataset.manifest.timeframe,
-        allocation=1.0, leverage=cfg.leverage, max_positions=1,
-        risk_per_trade=cfg.risk_per_trade,
-        stop_loss_pct=cfg.stop_loss_pct if cfg.stop_loss_pct is not None else 0.0,
-        take_profit_pct=cfg.take_profit_pct if cfg.take_profit_pct is not None else 0.0,
-    )
-    symbol = dataset.manifest.symbol
-
+    simulator = Simulator(dataset, config, settings=settings, start=start, stop=stop,
+                          label=policy.name)
     policy.reset(seed)
 
-    bars = stop - start
-    equity_curve = np.empty(bars, dtype=np.float64)
-    actions = np.zeros(bars, dtype=np.int8)
+    while True:
+        decision = policy.decide(simulator.context())
+        simulator.record_action(decision.action)
+        if simulator.done:
+            break
+        simulator.step(decision.action)
 
-    trades: list[TradeRecord] = []
-    block_reasons: dict[str, int] = {}
-    slippage_cost = 0.0
-    exposure_bars = 0
-
-    pending: PolicyAction | None = None
-    entry_index: int | None = None
-    bars_in_position = 0
-    bars_since_trade = 0
-    trades_taken = 0
-
-    for offset in range(bars):
-        i = start + offset
-        position = next(iter(portfolio.positions.values()), None)
-
-        # --- 1. execute the decision made on the previous bar, at this open ---
-        if pending is not None:
-            position, entry_index, opened, slip = _apply(
-                pending, dataset, i, portfolio, risk, execution, bot, cfg, symbol,
-                position, entry_index, trades, block_reasons,
-            )
-            slippage_cost += slip
-            if opened:
-                trades_taken += 1
-                bars_in_position = 0
-                bars_since_trade = 0
-            pending = None
-
-        # --- 2. stops and targets against this bar's range; the stop wins ties ---
-        if position is not None:
-            exit_ref, reason = _triggered_exit(position, dataset, i)
-            if exit_ref is not None:
-                side = Side.SELL if position.side is PositionSide.LONG else Side.BUY
-                price = execution.fill_price(side, _ticker(symbol, exit_ref, cfg.spread_bps))
-                slippage_cost += abs(price - exit_ref) * position.quantity
-                fee = execution.fee_for(price, position.quantity)
-                entry_fee = position.fees_paid
-                trade = portfolio.close_position(
-                    position, Fill(order_id="bt", price=price, quantity=position.quantity, fee=fee),
-                    reason=reason,
-                )
-                trades.append(_record(trade, entry_index or i, i, reason, entry_fee))
-                position, entry_index = None, None
-                bars_since_trade = 0
-
-        # --- 3. mark to this bar's close ---
-        close = float(dataset.close[i])
-        portfolio.mark(symbol, close)
-        equity_curve[offset] = portfolio.equity
-        if portfolio.positions:
-            exposure_bars += 1
-            bars_in_position += 1
-        else:
-            bars_in_position = 0
-        bars_since_trade += 1
-
-        # --- 4. ask for the next decision, from bars 0..i only ---
-        position = next(iter(portfolio.positions.values()), None)
-        account = _account_state(
-            portfolio, position, close, cfg, bars_in_position, bars_since_trade, trades_taken
-        )
-        decision = policy.decide(
-            PolicyContext(dataset=dataset, index=i, account=account, bot_id=bot.id)
-        )
-        actions[offset] = int(decision.action)
-        pending = decision.action if offset < bars - 1 else None
-
-    # --- close anything still open, so the equity curve ends realised ---
-    position = next(iter(portfolio.positions.values()), None)
-    if position is not None and cfg.close_at_end:
-        last = start + bars - 1
-        reference = float(dataset.close[last])
-        side = Side.SELL if position.side is PositionSide.LONG else Side.BUY
-        price = execution.fill_price(side, _ticker(symbol, reference, cfg.spread_bps))
-        slippage_cost += abs(price - reference) * position.quantity
-        fee = execution.fee_for(price, position.quantity)
-        entry_fee = position.fees_paid
-        trade = portfolio.close_position(
-            position, Fill(order_id="bt", price=price, quantity=position.quantity, fee=fee),
-            reason=CloseReason.MANUAL,
-        )
-        trades.append(_record(trade, entry_index or last, last, CloseReason.MANUAL,
-                              entry_fee, override=ExitReason.END_OF_DATA))
-        equity_curve[-1] = portfolio.equity
-
-    ts = dataset.ts[start:stop]
-    metrics = compute_metrics(
-        equity_curve, ts, trades,
-        bars_per_year=dataset.bars_per_day * 365.0,
-        exposure_bars=exposure_bars,
-        slippage_cost=slippage_cost,
-    )
-    return BacktestResult(
-        policy=policy.name,
-        dataset_id=dataset.manifest.dataset_id,
-        dataset_source=dataset.manifest.source,
-        symbol=symbol,
-        timeframe=dataset.manifest.timeframe,
-        start_index=start, stop_index=stop,
-        ts=ts, equity=equity_curve, trades=trades, metrics=metrics, actions=actions,
-        blocked_by_risk=sum(block_reasons.values()), block_reasons=block_reasons,
-        slippage_cost=slippage_cost, seed=seed, window=window,
-    )
+    simulator.finish()
+    return simulator.result(seed=seed, window=window)
 
 
 # --------------------------------------------------------------------------

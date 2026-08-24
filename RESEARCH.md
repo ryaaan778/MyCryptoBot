@@ -1,4 +1,4 @@
-# Research pipeline — Phase 1
+# Research pipeline — Phases 1–2
 
 Offline infrastructure for the multi-agent RL work: reproducible datasets,
 causal features, leak-resistant splits, honest metrics, and a backtester that
@@ -167,9 +167,79 @@ trading"** — and it has to clear it after costs, which is where all five
 currently fail. A policy that trades often will need an edge above ~14 bps per
 round trip before it is worth anything at all.
 
+## Phase 2 — the RL environment
+
+`research/env.py` is a Gymnasium environment wrapped around
+`research.backtest.Simulator`, which was extracted from `run_backtest` for
+exactly this purpose. Both drive the same object, so the mechanics an agent
+learns against are byte-for-byte the mechanics its results are measured with.
+That refactor was verified by fingerprinting 54 runs (2 datasets × 9 policies ×
+3 configs) before and after: identical.
+
+```
+observation  24 causal market features + 7 account features = 31, clipped to ±10
+action       Discrete(4) — HOLD, LONG, SHORT, CLOSE
+fills        PaperExecution (spread, slippage, fees)
+sizing       RiskEngine.size_position — the agent picks a direction, never a size
+gating       RiskEngine.can_open — a blocked entry appears in info["blocked"]
+```
+
+**The risk engine is inside the loop, not around it.** From inside the
+environment an exposure or drawdown cap is not a penalty to trade off, it is a
+wall: the action simply does not happen. A learned policy therefore inherits the
+same authority structure as a hand-written strategy, structurally rather than by
+convention. A test drives 600 leveraged entries into a 0.001% exposure cap and
+asserts zero trades result.
+
+**The scaler is required, not fitted by the environment.** `TradingEnv` has no
+code path that computes normalisation statistics, because the natural place to
+do it is over the whole episode range — which leaks the future into every
+observation. `make_training_env` fits on training rows only; `make_eval_env`
+takes that same scaler. Refitting on the evaluation window would defeat the
+walk-forward split entirely.
+
+**`terminated` and `truncated` are kept distinct.** Ruin terminates; running out
+of bars truncates. Conflating them teaches a value function that reaching the
+end of the data is as bad as going broke.
+
+### Reward v1
+
+```
+r_t = Δlog_equity_t
+    − 1.0    · max(0, DD_t − DD_{t−1})     # NEW drawdown only
+    − 2e-4   · 1[position changed]
+    − 0.5    · max(0, −Δlog_equity_t)²
+```
+
+Four choices there are deliberate, and each is tested:
+
+- **Costs are not a term.** They are already inside equity via `PaperExecution`.
+  Subtracting them again would charge every trade twice and teach the agent that
+  trading costs about double what it really does.
+- **New drawdown, not absolute.** Penalising the *level* every step charges the
+  agent repeatedly for a mistake it can no longer undo, and produces paralysis.
+  Recovering from a drawdown scores zero, not a penalty.
+- **No inactivity penalty.** Doing nothing scores *exactly* zero — verified over
+  a full episode, not approximately. Paying an agent to act teaches churn, and
+  churn is precisely how the shipped strategies lost their edge to fees. The
+  minimum-trade requirement lives in the validation gate instead.
+- **The tail term is convex.** A −1% bar costs 5e-5; a −50% bar costs 0.125.
+
+The units matter more than they look: `Portfolio` reports drawdown in percent,
+and feeding that straight in with `λ_dd = 1.0` would make the term a hundred
+times too heavy — enough to swamp the return term entirely and teach the agent
+never to open a position, while the training curve looked perfectly healthy.
+There is a test for the scaling.
+
+One invariant ties the whole thing to reality: **Σ Δlog_equity must equal
+log(final / initial equity)**, exactly. If those ever diverge the agent is being
+paid for something the equity curve did not do.
+
+The environment passes `gymnasium.utils.env_checker.check_env`.
+
 ## Tests
 
-`pytest` — 254 tests, of which 149 are new:
+`pytest` — 293 tests, of which 188 are new:
 
 - `test_research_leakage.py` — feature causality, regime threshold causality,
   backtest look-ahead, scaler fitting
@@ -179,6 +249,8 @@ round trip before it is worth anything at all.
 - `test_research_backtest.py` — bar protocol, stop-wins-ties, gap fills, cost
   accounting, risk authority
 - `test_research_determinism.py` — reproducibility and metric definitions
+- `test_research_env.py` — reward terms, Gymnasium conformance, env/backtester
+  bar-for-bar parity, risk authority inside the environment
 
 The original 105 backend tests are unchanged and green.
 
