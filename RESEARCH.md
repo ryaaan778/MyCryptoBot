@@ -1,4 +1,4 @@
-# Research pipeline — Phases 1–3
+# Research pipeline — Phases 1–4
 
 Offline infrastructure for the multi-agent RL work: reproducible datasets,
 causal features, leak-resistant splits, honest metrics, and a backtester that
@@ -21,6 +21,8 @@ python research.py split --scale 0.25
 python research.py backtest --policy mean_reversion
 python research.py baselines --scale 0.25 --seeds 3 --record
 python research.py report --metric sortino
+python research.py agents                        # the five identities and their drift
+python research.py campaign --agent KIRA --experiments 5
 ```
 
 Training, promotion and the RL agents arrive in Phase 3–5; those subcommands are
@@ -338,9 +340,90 @@ and trade indices are absolute dataset positions while the stitched arrays are
 not — leaving them unmapped silently dropped every trade or filed it under the
 wrong regime.
 
+## Phase 4 — five agents that can be wrong about themselves
+
+The five bots stop being hard-coded strategies and become research agents. Each
+has a **bias** — JOLYAN explores, JONATHAN looks for trend, JOSEPH watches
+regime, JOTARO minds risk, KIRA fades extension — and the important word is
+*starts*.
+
+A bias here is a prior over the search distribution. It skews which features are
+**likely** to be sampled, never which are possible, and it is blended with
+observed evidence on a shrinkage that shifts toward evidence as experiments
+accumulate. At `PRIOR_STRENGTH` observations the two contribute equally; beyond
+that, evidence dominates.
+
+The test that matters is `test_an_agent_can_discover_its_starting_bias_is_wrong`:
+JONATHAN begins trend-biased, is fed forty results in which reversion features
+score well and trend features score badly, and must end up favouring reversion —
+**without anyone editing its definition**. An agent that cannot be wrong about
+its own premise is a hard-coded strategy wearing a costume, which is the thing
+this phase replaces.
+
+Two guardrails on that mechanism, both tested: two unlucky experiments must not
+flip an agent's identity, and no feature is ever driven to zero weight, so a
+comprehensively discredited input can still be rediscovered if the market
+changes.
+
+### What an agent may propose
+
+`ExperimentSpec` is a complete, hashable description of one experiment — feature
+subset, reward weights, PPO hyperparameters, and the risk envelope. The search
+is **unbounded in kind, bounded in consequence**: any subset of the 24 features,
+any reward weighting, any hyperparameters, because a bad idea costs CPU and
+nothing else and restricting the search is how you forbid the thing that would
+have worked. What it may not do is propose past the risk engine —
+`risk_per_trade` and `leverage` are clamped to the hard caps at construction.
+
+Specs are content-addressed, so "have we tried this?" is a lookup. The generator
+rejects proposals that are near-duplicates of known failures, and the exclusion
+radius **widens as dead ends accumulate**, so a search that keeps rediscovering
+the same dead end is pushed further from it each time.
+
+### The safeguard that stops the gate being gamed
+
+Baselines are evaluated under a **fixed, neutral envelope — never the agent's**.
+If they inherited the spec's proposed risk and stop parameters, an agent could
+clear `beats_best_baseline` by proposing settings that cripple buy-and-hold
+rather than by learning anything, and the gate would wave it through. Holding
+the baselines fixed keeps the comparison honest: can this policy, with the
+envelope it wants, beat a sensible strategy with a sensible one?
+
+Baselines are also cached per (dataset, plan, seeds), since they do not depend on
+the spec and recomputing nine of them per experiment would dominate a campaign.
+
+### A campaign, end to end
+
+```
+--- KIRA: contrarian — fades extension, expects reversion
+  e825d00c5113  score  -22.568    8165 trades  rejected
+  650d428d2acc  score    0.000      47 trades  rejected
+  -> 2 experiments, 0 candidate(s), bias drift 4%
+
+--- JONATHAN: trend — leans on directional persistence
+  943d673cd6d1  score    0.000       0 trades  rejected
+      minimum_trades: 0 trades, need 30
+  a9e3b3929235  score  -20.106    6705 trades  rejected
+  -> 2 experiments, 0 candidate(s), bias drift 7%
+```
+
+Propose → train a seed ensemble → walk-forward every window → gate → record →
+update the prior. Campaigns are sequential rather than batched so each proposal
+sees the previous outcome; an agent that cannot react to its own last result is
+running a random search with extra steps.
+
+JONATHAN's first hypothesis produced **zero trades** — the do-nothing optimum
+again, now caught by the gate's minimum-trade condition rather than by the
+reward, exactly as designed.
+
+Hypothesis generation is **programmatic, not an LLM**: a seeded search over a
+typed space, so the whole pipeline stays deterministic and testable before any
+language model is involved. The LLM enters in Phase 6 as an additional proposer
+subject to identical gates — it can emit a hypothesis, never a trade.
+
 ## Tests
 
-`pytest` — 370 tests, of which 265 are new:
+`pytest` — 402 tests, of which 297 are new:
 
 - `test_research_leakage.py` — feature causality, regime threshold causality,
   backtest look-ahead, scaler fitting
@@ -357,6 +440,8 @@ wrong regime.
 - `test_research_gate.py` — every promotion condition, each failed in isolation
 - `test_policy_runtime.py` — the numpy inference path and the torch-isolation
   guarantee
+- `test_research_agents.py` — the hypothesis space, memory, the baseline-gaming
+  safeguard, and above all that a bias can be overturned by evidence
 
 The original 105 backend tests are unchanged and green.
 

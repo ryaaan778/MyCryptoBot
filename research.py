@@ -17,8 +17,10 @@ regardless of what the settings say.
     python research.py report   --dataset <id>
     python research.py train    --agent JOLYAN --dataset <id>
     python research.py evaluate --agent JOLYAN --dataset <id>
+    python research.py agents                       # the five research identities
+    python research.py campaign --agent KIRA --experiments 5
 
-``train`` and ``evaluate`` need torch and stable-baselines3, which live in
+``train``, ``evaluate`` and ``campaign`` need torch and stable-baselines3, which live in
 requirements-research.txt and are deliberately not installed alongside the
 trading server. The multi-agent research loop (JOJO ranking agents, hypothesis
 generation) arrives in Phases 4-6 and is absent rather than stubbed, so
@@ -45,6 +47,7 @@ from research.experiments import ExperimentStore
 from research.features import FEATURE_SET_VERSION, available_features, build_features
 from research.metrics import aggregate, summarise
 from research.policy import BASELINE_POLICIES, STRATEGY_POLICIES, make_policy
+from research.agents import AGENT_BIASES, build_agents
 from research.evaluate import (
     GateConfig, compare_to_baselines, evaluate_gate, regime_metrics_across_seeds,
 )
@@ -480,6 +483,73 @@ def cmd_evaluate(args) -> int:
     return 0 if gate.passed else 2
 
 
+def cmd_agents(args) -> int:
+    """Show each agent's bias and how far evidence has moved it."""
+    root = Path(args.root)
+    with ExperimentStore(root / "research.db") as store:
+        agents = build_agents(store, names=args.agent)
+        for agent in agents:
+            print(agent.summary())
+            weights = agent.effective_weights()
+            top = sorted(weights.items(), key=lambda kv: -kv[1])[:6]
+            bottom = sorted(weights.items(), key=lambda kv: kv[1])[:3]
+            print(f"          favours: {', '.join(f'{k} {v:.2f}' for k, v in top)}")
+            print(f"          avoids:  {', '.join(f'{k} {v:.2f}' for k, v in bottom)}")
+            if agent.bias_drift() > 0.15:
+                print("          NOTE: evidence has moved this agent well off its "
+                      "starting bias — which is allowed, and is the point.")
+            print()
+    return 0
+
+
+def cmd_campaign(args) -> int:
+    """Run one agent's propose -> train -> evaluate -> gate loop N times."""
+    try:
+        from research.campaign import BaselineCache, CampaignConfig, make_runner
+    except ImportError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    root = Path(args.root)
+    dataset = resolve_dataset(root, args.dataset)
+    plan = _walk_forward_plan(dataset, args)
+
+    with ExperimentStore(root / "research.db") as store:
+        store.register_dataset(dataset.manifest)
+        agents = build_agents(store, seed=args.seed, names=args.agent)
+        cache = BaselineCache()
+
+        print(f"{dataset.manifest.dataset_id}  [{dataset.manifest.source}]")
+        if dataset.manifest.is_synthetic:
+            print("SYNTHETIC — simulator output, not evidence about live markets")
+        print(f"{len(plan)} windows, training on window {args.train_window}, "
+              f"{args.seeds} seeds x {args.timesteps:,} timesteps per experiment")
+        print(f"{len(agents)} agent(s) x {args.experiments} experiment(s)\n")
+
+        for agent in agents:
+            config = CampaignConfig(
+                train_window=args.train_window,
+                seeds=tuple(range(args.seeds)),
+                total_timesteps=args.timesteps,
+                root=root,
+            )
+            runner = make_runner(config=config, baselines=cache, store=store,
+                                 agent_name=agent.name)
+            print(f"--- {agent.name}: {agent.bias.description}")
+            outcomes = agent.campaign(dataset, plan, runner=runner,
+                                      experiments=args.experiments,
+                                      total_timesteps=args.timesteps)
+            for outcome in outcomes:
+                verdict = "CANDIDATE" if outcome.promoted else (
+                    "ERROR" if not outcome.succeeded else "rejected")
+                print(f"  {outcome.spec.spec_id}  score {outcome.score:>8.3f}  "
+                      f"{outcome.trades:>6} trades  {verdict}")
+                if outcome.gate and not outcome.promoted:
+                    print(f"      {outcome.gate.reason()[:140]}")
+            print(f"  -> {agent.summary().splitlines()[1].strip()}\n")
+    return 0
+
+
 def cmd_report(args) -> int:
     root = Path(args.root)
     store = ExperimentStore(root / "research.db")
@@ -625,6 +695,23 @@ def build_parser() -> argparse.ArgumentParser:
     add_backtest_flags(p)
     add_split_flags(p)
     p.set_defaults(func=cmd_evaluate)
+
+    p = sub.add_parser("agents", help="show each agent's bias and its drift")
+    p.add_argument("--agent", action="append", default=None,
+                   help="restrict to one agent; repeatable")
+    p.set_defaults(func=cmd_agents)
+
+    p = sub.add_parser("campaign", help="run an agent's propose/train/evaluate/gate loop")
+    p.add_argument("--agent", action="append", default=None,
+                   help=f"one of {sorted(AGENT_BIASES)}; repeatable, default all")
+    p.add_argument("--dataset", default=None)
+    p.add_argument("--experiments", type=int, default=3)
+    p.add_argument("--train-window", type=int, default=0, dest="train_window")
+    p.add_argument("--timesteps", type=int, default=100_000)
+    p.add_argument("--seeds", type=int, default=5)
+    add_backtest_flags(p)
+    add_split_flags(p)
+    p.set_defaults(func=cmd_campaign)
 
     p = sub.add_parser("report", help="leaderboard from recorded results")
     p.add_argument("--dataset", default=None)
