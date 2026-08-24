@@ -19,6 +19,7 @@ regardless of what the settings say.
     python research.py evaluate --agent JOLYAN --dataset <id>
     python research.py agents                       # the five research identities
     python research.py campaign --agent KIRA --experiments 5
+    python research.py desk                         # JOJO: ranking and allocation
 
 ``train``, ``evaluate`` and ``campaign`` need torch and stable-baselines3, which live in
 requirements-research.txt and are deliberately not installed alongside the
@@ -48,6 +49,7 @@ from research.features import FEATURE_SET_VERSION, available_features, build_fea
 from research.metrics import aggregate, summarise
 from research.policy import BASELINE_POLICIES, STRATEGY_POLICIES, make_policy
 from research.agents import AGENT_BIASES, build_agents
+from research.jojo import AllocationConfig, JojoManager
 from research.evaluate import (
     GateConfig, compare_to_baselines, evaluate_gate, regime_metrics_across_seeds,
 )
@@ -550,6 +552,61 @@ def cmd_campaign(args) -> int:
     return 0
 
 
+def cmd_desk(args) -> int:
+    """JOJO's view: rank every agent's champion line, allocate paper capital."""
+    root = Path(args.root)
+    dataset = resolve_dataset(root, args.dataset)
+    settings = load_settings()
+    plan = _walk_forward_plan(dataset, args)
+    seeds = tuple(range(args.seeds))
+
+    with ExperimentStore(root / "research.db") as store:
+        store.register_dataset(dataset.manifest)
+        manager = JojoManager(store, allocation=AllocationConfig(
+            total_paper_capital=args.capital,
+            max_share=args.max_share,
+            reserve_fraction=args.reserve,
+            correlation_penalty=args.correlation_penalty,
+        ))
+
+        print(f"{dataset.manifest.dataset_id}  [{dataset.manifest.source}]")
+        if dataset.manifest.is_synthetic:
+            print("SYNTHETIC — simulator output, not evidence about live markets")
+        print()
+
+        by_agent: dict[str, list] = {}
+        for name in (args.agent or sorted(AGENT_BIASES)):
+            directories = _policy_directories(root, name, args.version)
+            if not directories:
+                print(f"  {name:<10} no exported policy — run `campaign` or `train` first")
+                continue
+            by_agent[name] = _learned_walk_forward(
+                directories, dataset, plan, config_for(args))
+            print(f"  {name:<10} evaluated {len(directories)} seed(s) over "
+                  f"{len(plan)} windows")
+
+        if args.baselines:
+            for name in ("flat", "buy_and_hold"):
+                by_agent[name] = run_walk_forward(
+                    lambda n=name: make_policy(n, settings.strategy_parameters),
+                    dataset, plan, config=config_for(args, name), seeds=seeds)
+
+        if not by_agent:
+            print("\nnothing to rank yet.")
+            return 0
+
+        print("\n" + manager.desk_report(by_agent))
+
+        if args.record:
+            manager.record_allocations(manager.allocate(by_agent))
+            print(f"\nallocations recorded to {root / 'research.db'}")
+
+        print("\nPaper capital only. Promotion here is a research status: nothing")
+        print("reaches live trading without the three-part gate and your explicit")
+        print("approval, per policy and per venue.")
+    return 0
+
+
 def cmd_report(args) -> int:
     root = Path(args.root)
     store = ExperimentStore(root / "research.db")
@@ -712,6 +769,24 @@ def build_parser() -> argparse.ArgumentParser:
     add_backtest_flags(p)
     add_split_flags(p)
     p.set_defaults(func=cmd_campaign)
+
+    p = sub.add_parser("desk", help="JOJO: rank agents and allocate paper capital")
+    p.add_argument("--agent", action="append", default=None)
+    p.add_argument("--dataset", default=None)
+    p.add_argument("--version", type=int, default=1)
+    p.add_argument("--seeds", type=int, default=5)
+    p.add_argument("--capital", type=float, default=50_000.0,
+                   help="total PAPER capital to spread across the desk")
+    p.add_argument("--max-share", type=float, default=0.4, dest="max_share")
+    p.add_argument("--reserve", type=float, default=0.2)
+    p.add_argument("--correlation-penalty", type=float, default=0.5,
+                   dest="correlation_penalty")
+    p.add_argument("--baselines", action="store_true",
+                   help="include flat and buy-and-hold in the ranking")
+    p.add_argument("--record", action="store_true")
+    add_backtest_flags(p)
+    add_split_flags(p)
+    p.set_defaults(func=cmd_desk)
 
     p = sub.add_parser("report", help="leaderboard from recorded results")
     p.add_argument("--dataset", default=None)

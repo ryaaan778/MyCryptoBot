@@ -532,6 +532,14 @@ class ExperimentStore:
         return [{**dict(r), "content": json.loads(r["content_json"])} for r in rows]
 
     def promote(self, *, agent: str, policy_id: str, reason: str) -> None:
+        if self.policy(policy_id) is None:
+            # The foreign key would catch this, but with an error that names
+            # neither the policy nor what to do about it.
+            raise ValueError(
+                f"cannot promote {policy_id!r}: it is not a registered policy. "
+                "Register it with register_policy() first, so the champion record "
+                "points at something with a training contract attached."
+            )
         previous = self.champion(agent)
         self.db.execute(
             """INSERT INTO champion_history (agent, policy_id, action, reason,

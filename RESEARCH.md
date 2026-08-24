@@ -1,4 +1,4 @@
-# Research pipeline — Phases 1–4
+# Research pipeline — Phases 1–5
 
 Offline infrastructure for the multi-agent RL work: reproducible datasets,
 causal features, leak-resistant splits, honest metrics, and a backtester that
@@ -23,6 +23,7 @@ python research.py baselines --scale 0.25 --seeds 3 --record
 python research.py report --metric sortino
 python research.py agents                        # the five identities and their drift
 python research.py campaign --agent KIRA --experiments 5
+python research.py desk --baselines               # JOJO: ranking and allocation
 ```
 
 Training, promotion and the RL agents arrive in Phase 3–5; those subcommands are
@@ -421,9 +422,88 @@ typed space, so the whole pipeline stays deterministic and testable before any
 language model is involved. The LLM enters in Phase 6 as an additional proposer
 subject to identical gates — it can emit a hypothesis, never a trade.
 
+## Phase 5 — JOJO manages the desk
+
+JOJO ranks the agents, decides each one's champion, allocates **paper** capital,
+and retires champions that have decayed. It does not trade.
+
+### What JOJO cannot do
+
+`research/jojo.py` never imports `backend.risk`, `backend.config`,
+`backend.execution` or `backend.orchestrator`. Its only lever is a row in the
+`allocations` table. That is asserted against the module's **import graph** with
+an AST walk, not promised in a docstring — "JOJO must not be able to override
+hard risk controls" is a property of the dependency graph here. A second test
+runs an allocation and asserts `allocations` is the only table that changed.
+
+### Correlation is a risk, not a win
+
+Five agents that all discovered the same edge are not five edges; they are one
+bet with five names on it, and a desk splitting capital equally across them is
+far more concentrated than its paperwork suggests.
+
+Correlation is measured on **per-bar equity returns**, not positions — positions
+answer "are they holding the same thing", returns answer "do they lose money at
+the same time", which is what a portfolio cares about. Window boundaries are
+dropped from the return series, since each window restarts at the same capital
+and that reset is nobody's return.
+
+The haircut **reduces deployment, it does not reshuffle it.** That distinction
+was a bug I found by testing it: applying the penalty only to relative weights
+left a fully converged desk deploying exactly as much capital as a diversified
+one — the concentration was invisible in the only number that matters. Now three
+identical agents receive less than 75% of what three independent ones do. Only
+*positive* correlation is charged; genuine diversification is not taxed.
+
+A desk whose mean pairwise correlation exceeds 0.7 gets a loud warning in the
+report.
+
+### Allocation rules
+
+- an agent scoring at or below zero gets **nothing** — zero is what doing
+  nothing scores, and paying an agent to underperform doing nothing is how a
+  desk funds its own losses;
+- no agent exceeds `max_share` of deployable capital;
+- `reserve_fraction` is never deployed, so a promising newcomer can be funded
+  without first taking capital from an incumbent — a desk that always deploys
+  100% is structurally biased toward whoever is already there;
+- capital freed by capping returns to the reserve rather than being
+  redistributed, so one strong agent cannot exceed its cap via everyone else's
+  leftovers.
+
+### Promotion and retirement are deliberately asymmetric
+
+A challenger that clears the gate becomes its agent's champion — a **research**
+status that deploys nothing. Live trading stays behind the existing three-part
+gate and an explicit human decision, per policy and per venue.
+
+Retirement, by contrast, is automatic: a champion that loses to the best
+baseline in enough recent windows, or that decays past a fraction of the score
+it was promoted on, stands down without asking. Standing down reduces exposure,
+so erring toward it is cheap; deploying is the direction that costs money when
+wrong.
+
+### The desk today
+
+```
+agent           sortino     maxDD  trades    corr     paper $   note
+KIRA              0.000     0.00%      15   +0.01           0   beaten by doing nothing
+flat              0.000     0.00%       0   +0.00           0   beaten by doing nothing
+buy_and_hold     -0.876     4.59%      33   -0.06           0   beaten by doing nothing
+JOLYAN           -4.356     5.50%     837   +0.00           0   beaten by doing nothing
+JONATHAN        -19.741    18.47%    3947   -0.09           0   beaten by doing nothing
+
+desk mean pairwise correlation: -0.03
+deployed 0 of 50,000 paper capital
+```
+
+**JOJO allocates zero to everyone**, because nothing on the desk beats doing
+nothing. That is the correct answer, and it is the one the system is built to be
+able to give.
+
 ## Tests
 
-`pytest` — 402 tests, of which 297 are new:
+`pytest` — 436 tests, of which 331 are new:
 
 - `test_research_leakage.py` — feature causality, regime threshold causality,
   backtest look-ahead, scaler fitting
@@ -442,6 +522,9 @@ subject to identical gates — it can emit a hypothesis, never a trade.
   guarantee
 - `test_research_agents.py` — the hypothesis space, memory, the baseline-gaming
   safeguard, and above all that a bias can be overturned by evidence
+- `test_research_jojo.py` — correlation, allocation caps and reserve, promotion
+  and retirement, and the import-graph proof that JOJO cannot reach the risk
+  engine
 
 The original 105 backend tests are unchanged and green.
 
