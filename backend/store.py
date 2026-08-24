@@ -163,7 +163,11 @@ CREATE TABLE IF NOT EXISTS policies (
     weights_path TEXT,
     status TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    UNIQUE (agent, version),
+    -- Seed is part of the identity, not an attribute of it. A version is
+    -- trained once per seed: inference is argmax and therefore deterministic,
+    -- so seed diversity can only come from separate training runs, and five of
+    -- them legitimately share one (agent, version).
+    UNIQUE (agent, version, seed),
     FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
 );
 CREATE INDEX IF NOT EXISTS idx_policies_agent ON policies(agent, version DESC);

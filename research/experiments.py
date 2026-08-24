@@ -116,7 +116,84 @@ class ExperimentStore:
         # happily.
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(RESEARCH_SCHEMA)
+        self._migrate()
         self.db.commit()
+
+    def _migrate(self) -> None:
+        """Bring an older database up to the current schema.
+
+        ``CREATE TABLE IF NOT EXISTS`` cannot change a constraint on a table that
+        already exists, so a database created before ``policies`` was keyed on
+        the seed keeps rejecting the second seed of a version with an opaque
+        IntegrityError. Rebuilding is safe because every column is carried over;
+        the alternative is telling people to delete their research history.
+
+        The rename runs under ``legacy_alter_table``. Without it SQLite helpfully
+        rewrites every foreign key that pointed at ``policies`` to point at the
+        temporary name instead — and once the temporary table is dropped, those
+        tables reference something that no longer exists and every insert fails
+        with "no such table". :meth:`_repair_dangling_references` undoes that
+        damage where an earlier version already caused it.
+        """
+        self._repair_dangling_references()
+
+        row = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='policies'"
+        ).fetchone()
+        if row is None or "UNIQUE (agent, version, seed)" in (row["sql"] or ""):
+            return
+
+        logger.info("migrating `policies` to key on (agent, version, seed)")
+        self.db.execute("PRAGMA foreign_keys = OFF")
+        self.db.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            self.db.execute("ALTER TABLE policies RENAME TO policies_legacy")
+            self.db.executescript(RESEARCH_SCHEMA)
+            columns = [r["name"] for r in self.db.execute("PRAGMA table_info(policies)")]
+            legacy = {r["name"] for r in self.db.execute("PRAGMA table_info(policies_legacy)")}
+            shared = ", ".join(c for c in columns if c in legacy)
+            self.db.execute(
+                f"INSERT INTO policies ({shared}) SELECT {shared} FROM policies_legacy")
+            self.db.execute("DROP TABLE policies_legacy")
+            self.db.commit()
+        finally:
+            self.db.execute("PRAGMA legacy_alter_table = OFF")
+            self.db.execute("PRAGMA foreign_keys = ON")
+
+    def _repair_dangling_references(self) -> None:
+        """Rebuild tables whose foreign keys point at a table that no longer exists.
+
+        An earlier migration renamed ``policies`` without ``legacy_alter_table``,
+        which silently repointed ``policy_metrics`` and ``evaluations`` at the
+        temporary name. Everything reads fine until the first insert, which then
+        fails with an error naming a table nobody has ever heard of.
+        """
+        damaged = [
+            r["name"] for r in self.db.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' "
+                "AND sql LIKE '%policies_legacy%' AND name != 'policies_legacy'"
+            )
+        ]
+        if not damaged:
+            return
+
+        logger.warning("repairing %s: foreign keys point at a dropped table", damaged)
+        self.db.execute("PRAGMA foreign_keys = OFF")
+        self.db.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            for table in damaged:
+                self.db.execute(f"ALTER TABLE {table} RENAME TO {table}_broken")
+                self.db.executescript(RESEARCH_SCHEMA)
+                columns = [r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")]
+                old = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table}_broken)")}
+                shared = ", ".join(c for c in columns if c in old)
+                self.db.execute(
+                    f"INSERT INTO {table} ({shared}) SELECT {shared} FROM {table}_broken")
+                self.db.execute(f"DROP TABLE {table}_broken")
+            self.db.commit()
+        finally:
+            self.db.execute("PRAGMA legacy_alter_table = OFF")
+            self.db.execute("PRAGMA foreign_keys = ON")
 
     def __enter__(self) -> "ExperimentStore":
         return self

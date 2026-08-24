@@ -1,4 +1,4 @@
-# Research pipeline — Phases 1–2
+# Research pipeline — Phases 1–3
 
 Offline infrastructure for the multi-agent RL work: reproducible datasets,
 causal features, leak-resistant splits, honest metrics, and a backtester that
@@ -237,9 +237,110 @@ paid for something the equity curve did not do.
 
 The environment passes `gymnasium.utils.env_checker.check_env`.
 
+## Phase 3 — JOLYAN, trained and rejected
+
+The first learned policy, end to end: PPO on one walk-forward window, exported,
+walk-forwarded against all nine baselines, put through the promotion gate.
+
+```bash
+python research.py train    --agent JOLYAN --scale 0.25 --window 0 --seeds 5 --record
+python research.py evaluate --agent JOLYAN --scale 0.25 --record
+```
+
+### The result
+
+```
+JOLYAN_v1: REJECT
+  [FAIL] beats_best_baseline        sortino -4.356 vs best baseline always_short 0.683
+  [PASS] beats_champion             no incumbent champion; baseline condition governs
+  [PASS] minimum_trades             837 trades, need 30
+  [PASS] minimum_seeds              5 distinct seed(s), need 5
+  [FAIL] positive_median_return     median return -1.81% across 55 runs
+  [PASS] no_catastrophic_regime     worst regime DD 51.53% vs allowed 103.05%
+  [FAIL] recent_windows_hold_up     0 of the last 3 windows at or above baseline, need 2
+```
+
+**This is the pipeline working, not failing.** RL on a single price series
+overfits aggressively, and most trained policies *should* lose out of sample.
+The point of building the baselines and the gate first was so that outcome would
+be visible instead of flattering.
+
+What the five seeds actually learned is more interesting than the rejection:
+
+```
+ seed   trades  median ret%  action mix
+    0        0        +0.00  HOLD 42%  LONG  0%  SHORT  0%  CLOSE 58%
+    1      193        -2.72  HOLD 39%  LONG 12%  SHORT  0%  CLOSE 49%
+    2      183        -3.13  HOLD 58%  LONG  9%  SHORT  2%  CLOSE 31%
+    3       90        -1.47  HOLD 19%  LONG  1%  SHORT 10%  CLOSE 69%
+    4      371        -6.91  HOLD 50%  LONG  5%  SHORT  7%  CLOSE 38%
+```
+
+Seed 0 learned to **never open a position** — it emits only HOLD and CLOSE, and
+CLOSE while flat is a no-op. That is the lazy local optimum the reward design
+predicts out loud: doing nothing scores exactly zero, zero beats negative, and
+there is deliberately no inactivity penalty to push it off that optimum. It is
+also the correct answer on this tape, where `flat` beats every shipped strategy.
+The four seeds that did trade all lost, and lost more the more they traded.
+
+### Keeping torch out of the trading server
+
+Training exports two artefacts: `model.zip` for SB3, and `weights.npz` +
+`metadata.json` that `backend/policy/` reads with a hand-written numpy forward
+pass. A process holding real positions should not be able to die because of a
+broken CUDA install, and 500MB of GPU libraries have no business in a loop that
+does four matrix multiplies per bar.
+
+The guarantee is tested two ways: the numpy and SB3 forward passes agree to
+**1.4e-7** on 300 random observations with identical `argmax` actions, and a
+subprocess test imports the whole trading path (`backend.app`,
+`backend.orchestrator`, `backend.policy`) in a clean interpreter and asserts
+that `torch`, `stable_baselines3` and `gymnasium` are all absent from
+`sys.modules`. That test previously passed by accident of collection order —
+another test file imports torch — which is why it now runs in its own process.
+
+### Four bugs this phase surfaced
+
+Each was found by running the thing rather than by reading it, and each is now a
+test.
+
+**Evaluation seeds were fake diversity.** The gate requires a positive median
+across ≥5 seeds. Inference is `argmax` and therefore deterministic, so running
+one policy under five evaluation seeds produces five *identical* runs — and a
+single lucky training run would have satisfied a requirement meant to prove
+robustness. Seeds now come from `train_seed_ensemble`, which trains one policy
+per seed.
+
+**`UNIQUE (agent, version)` could not hold a seed ensemble.** Five policies
+legitimately share one version. The constraint is now
+`(agent, version, seed)`, with a migration that rebuilds the table rather than
+telling anyone to delete their research history.
+
+**The migration then corrupted three tables.** `ALTER TABLE ... RENAME` silently
+rewrites every foreign key pointing at the renamed table — so `policy_metrics`,
+`evaluations` and `champion_history` ended up referencing a temp table that was
+then dropped, and every subsequent insert failed with "no such table". The
+rename now runs under `PRAGMA legacy_alter_table`, and `_repair_dangling_references`
+fixes databases already damaged this way.
+
+**The regime veto was vacuous, then wrongly calibrated.** It reported one
+arbitrary seed — which happened to be the do-nothing seed — so every regime
+showed 0.00% drawdown and the condition passed without checking anything. Now it
+pools all seeds and keeps the worst drawdown per regime. Fixing that exposed a
+second problem: the 51.53% regime figure is compounded across windows while the
+5.50% basis was a per-window median, a threshold the basis could never reach.
+Both sides are now measured on the same stitched curve.
+
+Stitching itself had two defects worth naming: concatenating per-window equity
+curves injects a fabricated jump at every boundary (each window restarts at the
+same capital, so 9,200 followed by 10,000 reads as a +8.7% bar nobody traded),
+and trade indices are absolute dataset positions while the stitched arrays are
+not — leaving them unmapped silently dropped every trade or filed it under the
+wrong regime.
+
 ## Tests
 
-`pytest` — 293 tests, of which 188 are new:
+`pytest` — 370 tests, of which 265 are new:
 
 - `test_research_leakage.py` — feature causality, regime threshold causality,
   backtest look-ahead, scaler fitting
@@ -251,6 +352,11 @@ The environment passes `gymnasium.utils.env_checker.check_env`.
 - `test_research_determinism.py` — reproducibility and metric definitions
 - `test_research_env.py` — reward terms, Gymnasium conformance, env/backtester
   bar-for-bar parity, risk authority inside the environment
+- `test_research_train.py` — export, numpy/SB3 parity, the training contract,
+  and the seed-diversity distinction
+- `test_research_gate.py` — every promotion condition, each failed in isolation
+- `test_policy_runtime.py` — the numpy inference path and the torch-isolation
+  guarantee
 
 The original 105 backend tests are unchanged and green.
 

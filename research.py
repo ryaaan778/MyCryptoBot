@@ -15,10 +15,14 @@ regardless of what the settings say.
     python research.py backtest --dataset <id> --policy mean_reversion
     python research.py baselines --dataset <id>   # every policy, walk-forward
     python research.py report   --dataset <id>
+    python research.py train    --agent JOLYAN --dataset <id>
+    python research.py evaluate --agent JOLYAN --dataset <id>
 
-Training, promotion and the RL agents arrive in later phases; those subcommands
-are deliberately absent rather than stubbed, so ``--help`` describes what the
-system can actually do today.
+``train`` and ``evaluate`` need torch and stable-baselines3, which live in
+requirements-research.txt and are deliberately not installed alongside the
+trading server. The multi-agent research loop (JOJO ranking agents, hypothesis
+generation) arrives in Phases 4-6 and is absent rather than stubbed, so
+``--help`` describes what the system can actually do today.
 """
 
 from __future__ import annotations
@@ -41,6 +45,9 @@ from research.experiments import ExperimentStore
 from research.features import FEATURE_SET_VERSION, available_features, build_features
 from research.metrics import aggregate, summarise
 from research.policy import BASELINE_POLICIES, STRATEGY_POLICIES, make_policy
+from research.evaluate import (
+    GateConfig, compare_to_baselines, evaluate_gate, regime_metrics_across_seeds,
+)
 from research.regimes import Regime, label_regimes
 from research.splits import (
     SplitConfig, SplitPlan, default_config, make_walk_forward, scale_config,
@@ -304,6 +311,175 @@ def cmd_baselines(args) -> int:
     return 0
 
 
+def _policy_directories(root: Path, agent: str, version: int,
+                        explicit: str | None = None) -> list[tuple[int, Path]]:
+    """Every seed of one policy version, as ``(training_seed, directory)``.
+
+    Seeds come from separately trained policies rather than from evaluating one
+    policy repeatedly. Inference is argmax and therefore deterministic, so N
+    evaluation seeds of a single policy are N identical runs — which would let a
+    single lucky training run satisfy the gate's five-seed requirement.
+    """
+    if explicit:
+        return [(0, Path(explicit))]
+    directory = root / "policies"
+    found = sorted(directory.glob(f"{agent}_v{version}_s*"))
+    if found:
+        return [(int(path.name.rsplit("_s", 1)[1]), path) for path in found]
+    single = directory / f"{agent}_v{version}"
+    return [(0, single)] if (single / "weights.npz").is_file() else []
+
+
+def _learned_walk_forward(directories, dataset, plan, config, windows=None):
+    """Evaluate exported policies on validation ranges only, one seed each."""
+    from research.learned import LearnedPolicy
+
+    results = []
+    for window in (windows if windows is not None else plan.windows):
+        for seed, directory in directories:
+            policy = LearnedPolicy.from_directory(directory, dataset)
+            results.append(run_backtest(
+                policy, dataset, start=window.validate.start, stop=window.validate.stop,
+                config=config, seed=seed, window=window.index,
+            ))
+    return results
+
+
+def cmd_train(args) -> int:
+    try:
+        from research.train import TrainConfig, train_policy
+    except ImportError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    root = Path(args.root)
+    dataset = resolve_dataset(root, args.dataset)
+    plan = _walk_forward_plan(dataset, args)
+    window = plan.windows[args.window]
+
+    print(f"{dataset.manifest.dataset_id}  [{dataset.manifest.source}]")
+    print(f"training {args.agent} v{args.version} on window {window.index}: "
+          f"{window.train.describe()} ({len(window.train):,} bars)")
+    print(f"validation is {window.validate.describe()} and is NOT trained on")
+    if dataset.manifest.is_synthetic:
+        print("NOTE: synthetic data. This trains the pipeline, not a tradeable policy.")
+
+    train_config = TrainConfig(
+        total_timesteps=args.timesteps, episode_bars=args.episode_bars,
+        n_envs=args.envs, seed=args.seed,
+    )
+    seeds = tuple(range(args.seeds))
+    print(f"{args.seeds} seed(s) x {args.timesteps:,} timesteps\n")
+
+    from research.train import train_seed_ensemble
+
+    ensemble = train_seed_ensemble(
+        dataset, agent=args.agent,
+        train_start=window.train.start, train_stop=window.train.stop,
+        seeds=seeds, version=args.version, train_config=train_config,
+        root=root, backtest_config=config_for(args), progress=args.verbose,
+    )
+    for trained in ensemble:
+        print(f"  {trained.policy_id:<24} {trained.trained_on['wall_seconds']:>7.1f}s "
+              f"-> {trained.directory}")
+
+    if args.record:
+        with ExperimentStore(root / "research.db") as store:
+            store.register_dataset(dataset.manifest)
+            for seed, trained in zip(seeds, ensemble):
+                store.register_policy(
+                    agent=args.agent, kind="learned", algo="PPO",
+                    hyperparams=trained.train_config.as_dict(),
+                    feature_set=trained.feature_names,
+                    feature_set_version=trained.metadata["feature_set_version"],
+                    reward_version=trained.metadata["reward_version"],
+                    seed=seed, model_path=str(trained.model_path),
+                    weights_path=str(trained.weights_path),
+                    version=args.version, policy_id=trained.policy_id,
+                )
+        print(f"\n  recorded {len(ensemble)} policies to {root / 'research.db'}")
+    return 0
+
+
+def cmd_evaluate(args) -> int:
+    """Walk-forward a trained policy against every baseline, then run the gate."""
+    root = Path(args.root)
+    dataset = resolve_dataset(root, args.dataset)
+    settings = load_settings()
+    plan = _walk_forward_plan(dataset, args)
+    policy_id = f"{args.agent}_v{args.version}"
+    directories = _policy_directories(root, args.agent, args.version, args.policy_dir)
+    if not directories:
+        raise SystemExit(
+            f"no exported policy for {policy_id} under {root / 'policies'}. Run `train` first.")
+    seeds = tuple(seed for seed, _ in directories)
+
+    print(f"{dataset.manifest.dataset_id}  [{dataset.manifest.source}]")
+    if dataset.manifest.is_synthetic:
+        print("SYNTHETIC — simulator output, not evidence about live markets")
+    print(f"{policy_id} over {len(plan)} windows x {len(seeds)} trained seed(s) "
+          f"{list(seeds)}\n")
+
+    challenger = _learned_walk_forward(directories, dataset, plan, config_for(args))
+    print(f"  {policy_id:<21} done ({int(sum(r.metrics['trades'] for r in challenger)):,} trades)")
+
+    baselines = {}
+    for name in list(BASELINE_POLICIES) + list(STRATEGY_POLICIES):
+        baselines[name] = run_walk_forward(
+            lambda n=name: make_policy(n, settings.strategy_parameters, seed=args.seed),
+            dataset, plan, config=config_for(args, name), seeds=seeds)
+        print(f"  {name:<21} done "
+              f"({int(sum(r.metrics['trades'] for r in baselines[name])):,} trades)")
+
+    print("\n" + compare_to_baselines(challenger, baselines))
+
+    # Per-regime metrics on the concatenated validation ranges, so the gate can
+    # veto a policy that only works in one market state.
+    labels = label_regimes(dataset)
+    regime_metrics = {}
+    regime_metrics, stitched_drawdown = regime_metrics_across_seeds(
+        challenger, labels, bars_per_year=dataset.bars_per_day * 365.0,
+        min_bars=args.min_regime_bars,
+        regime_name=lambda code: Regime(code).label,
+    )
+    regime_metrics.pop(Regime.UNKNOWN.label, None)
+    if regime_metrics:
+        print(f"\nper-regime across all seeds (worst drawdown, median of the rest); "
+              f"worst stitched overall DD {stitched_drawdown:.2f}%:")
+        print(f"  {'regime':<16}{'median ret%':>13}{'worst DD%':>11}{'median win%':>13}"
+              f"{'trades':>8}{'seeds':>7}")
+        for name, metrics in sorted(regime_metrics.items()):
+            print(f"  {name:<16}{metrics['total_return_pct']:>+13.2f}"
+                  f"{metrics['max_drawdown_pct']:>11.2f}{metrics['win_rate_pct']:>13.1f}"
+                  f"{int(metrics['trades']):>8}{int(metrics['seeds']):>7}")
+
+    gate = evaluate_gate(policy_id, challenger, baselines=baselines,
+                         regime_metrics=regime_metrics or None,
+                         overall_drawdown_pct=stitched_drawdown or None,
+                         config=GateConfig(min_seeds=args.min_seeds))
+    print("\n" + gate.describe())
+
+    if args.record:
+        with ExperimentStore(root / "research.db") as store:
+            store.register_dataset(dataset.manifest)
+            if store.policy(policy_id) is None:
+                store.register_policy(agent=args.agent, kind="learned", algo="PPO",
+                                      version=args.version, policy_id=policy_id)
+            for result in challenger:
+                store.record_metrics(policy_id=policy_id,
+                                     dataset_id=dataset.manifest.dataset_id,
+                                     metrics=result.metrics, split_id=plan.split_id,
+                                     window=result.window, seed=result.seed)
+            from research.experiments import EvaluationStage
+
+            store.record_evaluation(
+                policy_id=policy_id, dataset_id=dataset.manifest.dataset_id,
+                split_id=plan.split_id, stage=EvaluationStage.WALK_FORWARD,
+                passed=gate.passed, gates=gate.as_dict(), reason=gate.reason())
+        print(f"\nrecorded to {root / 'research.db'}")
+    return 0 if gate.passed else 2
+
+
 def cmd_report(args) -> int:
     root = Path(args.root)
     store = ExperimentStore(root / "research.db")
@@ -422,6 +598,33 @@ def build_parser() -> argparse.ArgumentParser:
     add_backtest_flags(p)
     add_split_flags(p)
     p.set_defaults(func=cmd_baselines)
+
+    p = sub.add_parser("train", help="train a PPO policy on one walk-forward window")
+    p.add_argument("--agent", required=True, help="e.g. JOLYAN")
+    p.add_argument("--dataset", default=None)
+    p.add_argument("--version", type=int, default=1)
+    p.add_argument("--window", type=int, default=0, help="which walk-forward window to train on")
+    p.add_argument("--timesteps", type=int, default=200_000)
+    p.add_argument("--seeds", type=int, default=5,
+                   help="train this many policies, one per seed (the gate needs >=5)")
+    p.add_argument("--episode-bars", type=int, default=2_000, dest="episode_bars")
+    p.add_argument("--envs", type=int, default=4)
+    p.add_argument("--record", action="store_true")
+    add_backtest_flags(p)
+    add_split_flags(p)
+    p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("evaluate", help="walk-forward a trained policy through the gate")
+    p.add_argument("--agent", required=True)
+    p.add_argument("--dataset", default=None)
+    p.add_argument("--version", type=int, default=1)
+    p.add_argument("--policy-dir", default=None, dest="policy_dir")
+    p.add_argument("--min-seeds", type=int, default=5, dest="min_seeds")
+    p.add_argument("--min-regime-bars", type=int, default=200, dest="min_regime_bars")
+    p.add_argument("--record", action="store_true")
+    add_backtest_flags(p)
+    add_split_flags(p)
+    p.set_defaults(func=cmd_evaluate)
 
     p = sub.add_parser("report", help="leaderboard from recorded results")
     p.add_argument("--dataset", default=None)

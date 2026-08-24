@@ -317,3 +317,49 @@ def test_research_store_does_not_create_the_trading_tables(store):
                          "equity_curve", "audit_log"})
     assert names == {"datasets", "experiments", "policies", "policy_metrics",
                      "evaluations", "agent_memory", "champion_history", "allocations"}
+
+
+def test_five_seeds_of_one_version_can_coexist(store):
+    """Seed is part of a policy's identity, not an attribute of it.
+
+    Inference is argmax and therefore deterministic, so seed diversity can only
+    come from separate training runs — five of which legitimately share one
+    (agent, version).
+    """
+    for seed in range(5):
+        store.register_policy(agent="JOLYAN", kind="learned", algo="PPO",
+                              version=1, seed=seed, policy_id=f"JOLYAN_v1_s{seed}")
+    registered = store.policies("JOLYAN")
+    assert len(registered) == 5
+    assert {row["seed"] for row in registered} == {0, 1, 2, 3, 4}
+    # the same seed twice is still a duplicate
+    with pytest.raises(sqlite3.IntegrityError):
+        store.register_policy(agent="JOLYAN", kind="learned", version=1, seed=0,
+                              policy_id="JOLYAN_v1_s0_again")
+
+
+def test_an_older_database_is_migrated_rather_than_rejected(tmp_path):
+    """A schema change must not cost someone their research history."""
+    import sqlite3 as sql
+
+    path = tmp_path / "legacy.db"
+    legacy = sql.connect(path)
+    legacy.executescript("""
+        CREATE TABLE policies (
+            policy_id TEXT PRIMARY KEY, agent TEXT NOT NULL, version INTEGER NOT NULL,
+            kind TEXT NOT NULL, algo TEXT, experiment_id TEXT, hyperparams_json TEXT,
+            feature_set TEXT, feature_set_version TEXT, reward_version TEXT,
+            seed INTEGER, model_path TEXT, weights_path TEXT, status TEXT NOT NULL,
+            created_at INTEGER NOT NULL, UNIQUE (agent, version)
+        );
+        INSERT INTO policies VALUES
+            ('OLD_v1','OLD',1,'learned',NULL,NULL,NULL,NULL,NULL,NULL,0,NULL,NULL,'CANDIDATE',0);
+    """)
+    legacy.commit()
+    legacy.close()
+
+    with ExperimentStore(path) as migrated:
+        assert [row["policy_id"] for row in migrated.policies("OLD")] == ["OLD_v1"]
+        migrated.register_policy(agent="OLD", kind="learned", version=1, seed=1,
+                                 policy_id="OLD_v1_s1")
+        assert len(migrated.policies("OLD")) == 2
