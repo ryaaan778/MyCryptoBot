@@ -77,6 +77,72 @@ rather than hide it. Treat the defaults as untested, and start on paper.
 
 ---
 
+## Model-driven trading
+
+Any bot can run on a language model instead of a hand-written strategy. Set its
+`strategy` to `"llm"`, turn the feature on, and give it a key:
+
+```jsonc
+// config.json
+"llm": {
+  "enabled": true,
+  "model": "claude-opus-5",
+  "web_search": true,
+  "decide_every_sec": 300,      // per bot — this is what the API bill tracks
+  "daily_call_budget": 500,     // per bot, hard stop
+  "min_confidence": 0.5
+}
+```
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+python start.py
+```
+
+The agent reads its market, its own position, the account's drawdown, and its
+record of past decisions on that market — then searches the web if current
+context would change its read, and returns a stance.
+
+**What the model actually controls, and what it does not.** It returns a
+direction and a conviction. That is the whole vocabulary. A stance has no
+quantity field, no leverage field and no price, so there is no sentence the
+model can produce that moves more capital than the envelope allows. Size comes
+from `RiskEngine.size_position`, which takes the bot config, the price and the
+stop distance — confidence is not one of its arguments, and a test asserts the
+word does not appear in `backend/risk.py` at all. Conviction decides *whether*
+to act, never *how much*.
+
+This matters most for the thing the feature makes possible: the agent reads the
+open web, and web pages are written by people who may benefit from what it does
+next. Some are written specifically to manipulate systems like this one. A
+successful prompt injection can change which way an agent leans. It cannot
+change the size, cannot reach the risk engine, and cannot place an order — the
+risk engine never sees the retrieved content at all. The realistic worst case is
+one bad trade, sized exactly as any other trade would be.
+
+**It learns from its own record.** Every stance is written to an append-only
+JSONL file per bot, and when the position it opened closes — by the model's
+call, a stop, a take-profit, or the risk engine flattening it — the realised
+P&L is attached. The next prompt carries the recent decisions with outcomes, a
+calibration table of stated confidence against actual hit rate, and, for losing
+calls, the invalidation the model wrote for itself before it found out. An agent
+that has been claiming 0.9 and hitting 45% is shown that in the same breath as
+it is asked for a new number.
+
+**Cadence is separate from the tick.** A reasoning call takes tens of seconds; a
+tick is a few. The brain runs on its own schedule in the background and the
+trading loop reads whatever stance it currently holds, so the world never stalls
+on the API. A stance expires on the horizon the model gave it, capped by
+`stance_ttl_sec` — a six-hour-old opinion about a market that has since moved 8%
+is worse than no opinion. No live stance reads as HOLD, which is also what a
+missing key, an expired card or a network partition degrades to. A bot that
+cannot reach its model stops trading; it never falls back to guessing.
+
+This is paper trading. Real-money execution is still behind the unchanged
+three-part gate in **[Paper trading vs. live trading](#paper-trading-vs-live-trading)**.
+
+---
+
 ## Research pipeline
 
 The five bots also exist as **research agents** that form hypotheses, train

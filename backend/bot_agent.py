@@ -23,7 +23,9 @@ from .models import (
     SignalAction,
     now_ms,
 )
+from .llm.brain import AccountContext
 from .strategies import create_strategy
+from .strategies.base import Series
 
 if TYPE_CHECKING:  # pragma: no cover
     from .orchestrator import JojoOrchestrator
@@ -36,6 +38,7 @@ class BotAgent:
         self.config = config
         self.engine = engine
         self.strategy = create_strategy(config.strategy, engine.settings.strategy_parameters)
+        self.brain = self._build_brain()
         self.status: BotStatus = BotStatus.OFFLINE
         self.last_signal: Signal | None = None
         self.last_heartbeat: int = 0
@@ -47,6 +50,33 @@ class BotAgent:
         # every tick while a bot sits blocked or already positioned.
         self._last_emitted: tuple[str, str] | None = None
         self._last_emitted_ts = 0
+        # Realised P&L at the last tick. A change means a trade closed, which
+        # is how a model-driven bot finds out whether it was right.
+        self._last_realized: float | None = None
+
+    def _build_brain(self):
+        """Give the bot a model, if it is configured to have one.
+
+        Failure here is never fatal: a missing SDK or a missing key leaves the
+        strategy unbound, which holds. A bot that cannot reach its model does
+        not trade — it does not fall back to guessing.
+        """
+        from .llm.strategy import LLMStrategy
+
+        if not isinstance(self.strategy, LLMStrategy):
+            return None
+        settings = self.engine.settings
+        if not getattr(settings, "llm", None) or not settings.llm.enabled:
+            logger.info("%s is on the llm strategy but llm.enabled is false", self.name)
+            return None
+        try:
+            from .llm import build_brain
+            brain = build_brain(self.config, settings)
+        except Exception as exc:
+            logger.error("%s could not build its model brain: %s", self.name, exc)
+            return None
+        self.strategy.bind_brain(brain)
+        return brain
 
     # ---- identity ----------------------------------------------------------
 
@@ -74,6 +104,8 @@ class BotAgent:
 
     async def stop(self) -> None:
         self._running = False
+        if self.brain is not None:
+            await self.brain.aclose()
         if self._task:
             self._task.cancel()
             try:
@@ -137,6 +169,8 @@ class BotAgent:
 
         self._set_status(BotStatus.ANALYZING)
         position = self.engine.portfolio.position_for(self.id, self.config.symbol)
+        self._score_closed_trade()
+        self._maybe_think(candles, position)
         signal = self.strategy.evaluate(self.id, self.config.symbol, candles, position)
         self.last_signal = signal
 
@@ -158,6 +192,56 @@ class BotAgent:
         elif self.status is BotStatus.ANALYZING:
             self._set_status(BotStatus.IDLE)
         return signal
+
+    # ---- the model ---------------------------------------------------------
+
+    def _score_closed_trade(self) -> None:
+        """Feed a realised outcome back to the model that asked for the trade.
+
+        Detected from the bot's own realised P&L rather than by listening for a
+        close event, so it works no matter *how* the position ended — the
+        model's call, a stop, a take-profit, or the risk engine flattening it.
+        Being wrong because your stop hit is still being wrong, and the record
+        should say so.
+        """
+        if self.brain is None:
+            return
+        realized = self.engine.portfolio.bot_realized(self.id)
+        previous, self._last_realized = self._last_realized, realized
+        if previous is None:
+            return
+        delta = realized - previous
+        if abs(delta) < 1e-9:
+            return
+        self.brain.record_outcome(delta, note=f"realised on {self.config.symbol}")
+
+    def _maybe_think(self, candles, position) -> None:
+        """Kick off a reasoning call if one is due.
+
+        Fire-and-forget on purpose. The tick loop must stay responsive — the
+        world is animating off it — so this never awaits the model. The stance
+        it produces is picked up by a later tick.
+        """
+        if self.brain is None or not self.brain.due():
+            return
+
+        portfolio = self.engine.portfolio
+        total, _won, win_rate = portfolio.bot_win_rate(self.id)
+        account = AccountContext(
+            equity=portfolio.equity,
+            drawdown_pct=portfolio.drawdown_pct,
+            open_positions=len(portfolio.positions),
+            max_positions=self.engine.risk.limits.max_portfolio_positions,
+            realized_pnl=portfolio.bot_realized(self.id),
+            win_rate=win_rate,
+            trades=total,
+        )
+        self._set_status(BotStatus.ANALYZING)
+        self.brain.refresh_in_background(
+            symbol=self.config.symbol, timeframe=self.config.timeframe,
+            series=Series.from_candles(candles), position=position,
+            account=account,
+        )
 
     # A repeat of the same call is only worth re-announcing this often.
     REANNOUNCE_SEC = 60

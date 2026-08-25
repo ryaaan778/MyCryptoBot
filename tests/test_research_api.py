@@ -197,23 +197,35 @@ def test_the_default_state_is_labelled_synthetic():
 # ---- the websocket ---------------------------------------------------------
 
 
+def receive_frame(socket, wanted: str, *, limit: int = 12) -> dict:
+    """Read until a frame of the wanted type arrives.
+
+    The market tick loop publishes on its own cadence, so a decorative
+    ``market.kline`` can land between any two frames we care about. Asserting on
+    whatever happens to arrive next makes the test a coin flip under load.
+    """
+    for _ in range(limit):
+        frame = socket.receive_json()
+        if frame["type"] == wanted:
+            return frame
+    raise AssertionError(f"no {wanted!r} frame within {limit} frames")
+
+
 def test_research_arrives_as_its_own_frame_after_the_snapshot(client):
     """Trading data goes first. Research must never delay the snapshot."""
     with client.websocket_connect("/ws") as socket:
         first = socket.receive_json()
-        assert first["type"] == "snapshot"
-        second = socket.receive_json()
-        assert second["type"] == "research"
-        assert "available" in second["data"]
+        assert first["type"] == "snapshot", "trading state must arrive first"
+        research = receive_frame(socket, "research")
+        assert "available" in research["data"]
 
 
 def test_research_can_be_requested_on_demand(client):
     with client.websocket_connect("/ws") as socket:
-        socket.receive_json()   # snapshot
-        socket.receive_json()   # research
+        socket.receive_json()               # snapshot
+        receive_frame(socket, "research")   # the unsolicited one
         socket.send_json({"type": "research.request"})
-        frame = socket.receive_json()
-        assert frame["type"] == "research"
+        assert receive_frame(socket, "research")["type"] == "research"
 
 
 def test_agent_research_knows_when_it_is_busy():

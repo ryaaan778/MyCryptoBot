@@ -227,11 +227,38 @@ class ServerSettings(BaseModel):
     )
 
 
+class LLMSettings(BaseModel):
+    """Model-driven trading. Off by default — it costs money to turn on.
+
+    ``decide_every_sec`` is the one number worth thinking about before you run
+    this. It is the interval between reasoning calls *per bot*, so five bots at
+    300s is roughly 1,440 calls a day. ``daily_call_budget`` is the hard stop
+    underneath it, per bot, in case a misconfiguration would otherwise bill you
+    all night.
+    """
+
+    enabled: bool = False
+    provider: str = "anthropic"
+    model: str = "claude-opus-5"
+    api_key: str = ""                   # blank => read ANTHROPIC_API_KEY
+    decide_every_sec: float = 300.0     # per bot; the API cadence, not the tick
+    stance_ttl_sec: float = 1800.0      # a stance older than this is not traded
+    min_confidence: float = 0.5         # below this, a stance is only an opinion
+    web_search: bool = True
+    max_searches: int = 4               # per decision
+    max_tokens: int = 4000
+    effort: str = "medium"              # low | medium | high
+    memory_window: int = 20             # past decisions fed back into the prompt
+    daily_call_budget: int = 500        # per bot, hard stop
+    timeout_sec: float = 120.0
+
+
 class Settings(BaseModel):
     exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
     trading: TradingSettings = Field(default_factory=TradingSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
     strategy_parameters: dict[str, float] = Field(default_factory=dict)
     bots: list[BotConfig] = Field(default_factory=list)
 
