@@ -72,14 +72,24 @@ export interface CameraPreset {
 // its data boards inside the frame, not clipped at the edges.
 export const CAMERA_PRESETS: CameraPreset[] = [
   { id: 'WORLD', label: 'WORLD', position: [0, 78, 118], target: [0, 8, -4] },
-  { id: 'JOJO', label: 'JOJO', position: [0, 22, 46], target: [0, 10, 0] },
+  // Inside the market hall (z 29..51) the camera looks *through* the room's
+  // title billboard and roof beams at whatever it is aimed at, so the HQ and
+  // trading-floor views both sit clear of it.
+  // The pagoda runs from the ground to ~y22 and its boards sit at x = +/-13.5,
+  // so the frame is aimed at mid-height rather than the character's feet and
+  // stands ~30 units back — the height, not the width, is what has to fit.
+  { id: 'JOJO', label: 'JOJO', position: [0, 24, 27], target: [0, 11, 0] },
   { id: 'jonathan', label: 'JONATHAN', position: [0, 15, -18], target: [0, 6, -44] },
   { id: 'joseph', label: 'JOSEPH', position: [-21, 15, -8], target: [-44, 6, -22] },
   { id: 'jotaro', label: 'JOTARO', position: [21, 15, -8], target: [44, 6, -22] },
   { id: 'jolyan', label: 'JOLYAN', position: [-21, 15, 13], target: [-44, 6, 26] },
   { id: 'kira', label: 'KIRA', position: [21, 15, 13], target: [44, 6, 26] },
   { id: 'MARKET', label: 'MARKET', position: [0, 18, 72], target: [0, 13, 40] },
-  { id: 'FLOOR', label: 'TRADING FLOOR', position: [0, 16, 44], target: [0, 5, 20] },
+  // High and steep, along z=20. The sight line stays at the floor's own depth,
+  // clear of the market hall (z>=29) and the pagoda (|z|<=11), and looking down
+  // from y=34 keeps the hall's 20-unit pillars out of the frame rather than
+  // merely out of the way.
+  { id: 'FLOOR', label: 'TRADING FLOOR', position: [24, 34, 20], target: [0, 3, 20] },
   { id: 'RISK', label: 'RISK CENTER', position: [-30, 14, 34], target: [-16, 8, 10] },
 ]
 

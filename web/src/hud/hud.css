@@ -680,10 +680,14 @@ tbody tr:hover {
 
 .research-panel {
   position: absolute;
+  /* Centred rather than right-anchored: the bot panel is right-anchored too,
+     and the two overlapped whenever a character was selected. */
   top: 64px;
-  right: 12px;
-  width: min(560px, calc(100vw - 24px));
-  max-height: calc(100vh - 160px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: min(600px, calc(100vw - 24px));
+  max-height: calc(100vh - 230px);
   overflow-y: auto;
   pointer-events: auto;
   /* Effectively opaque. This is a data panel, and the world showing through it

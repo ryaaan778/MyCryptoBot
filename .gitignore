@@ -18,6 +18,13 @@ trading_bot_data/
 data/datasets/
 data/raw/
 data/splits/
+# Trained policy artefacts: a model.zip per seed per experiment. Reproducible
+# from the recorded ExperimentSpec, and 27 of them slipped into history before
+# this line existed.
+data/policies/
+# The runtime data directory config.json points at — trades, equity curve, and
+# the shared research database all live here.
+trading_bot_data/
 
 # Frontend
 node_modules/

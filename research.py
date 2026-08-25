@@ -60,7 +60,41 @@ from research.splits import (
     SplitConfig, SplitPlan, default_config, make_walk_forward, scale_config,
 )
 
-DEFAULT_ROOT = Path("data")
+def default_root() -> Path:
+    """Where research artefacts live: the same directory the server reads.
+
+    Taken from ``config.json`` rather than hard-coded, because a research root
+    that differs from the server's ``data_dir`` means the CLI records results
+    the voxel world's research panel can never see. That is exactly the bug this
+    replaced: the CLI wrote ``data/research.db`` while the server read
+    ``trading_bot_data/jojo.db``, and the panel reported "no research has run"
+    after a full campaign.
+    """
+    try:
+        return Path(load_settings().data_dir)
+    except Exception:
+        return Path("data")
+
+
+#: The research tables live in the *same* file the trading server reads, which
+#: is the whole reason RESEARCH_SCHEMA sits in backend/store.py. A separate
+#: research.db would have the CLI recording results the voxel world's research
+#: panel could never see — which is exactly what happened before this was fixed.
+RESEARCH_DB_NAME = "jojo.db"
+LEGACY_DB_NAME = "research.db"
+
+
+def research_db(root: str | Path) -> Path:
+    """Path to the shared database, migrating a pre-existing research.db once."""
+    directory = Path(root)
+    shared = directory / RESEARCH_DB_NAME
+    legacy = directory / LEGACY_DB_NAME
+    if legacy.exists() and not shared.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+        legacy.rename(shared)
+        logging.getLogger("research").info(
+            "moved %s to %s so the trading server can read it", legacy, shared)
+    return shared
 NO_EXIT_POLICIES = {"buy_and_hold", "always_short", "flat"}
 
 
@@ -138,7 +172,7 @@ def cmd_synth(args) -> int:
         symbol=args.symbol, timeframe=args.timeframe, bars=args.bars, seed=args.seed
     )
     directory = dataset.save(args.root)
-    with ExperimentStore(Path(args.root) / "research.db") as store:
+    with ExperimentStore(research_db(args.root)) as store:
         store.register_dataset(dataset.manifest)
     print(dataset.manifest.describe())
     print(f"  -> {directory}")
@@ -160,7 +194,7 @@ def cmd_collect(args) -> int:
         print(f"collection failed: {exc}", file=sys.stderr)
         return 1
     directory = dataset.save(args.root)
-    with ExperimentStore(Path(args.root) / "research.db") as store:
+    with ExperimentStore(research_db(args.root)) as store:
         store.register_dataset(dataset.manifest)
     print(dataset.manifest.describe())
     print(f"  -> {directory}")
@@ -260,7 +294,7 @@ def cmd_baselines(args) -> int:
           f"{len(plan.windows[0].validate):,} validation bars each")
     print(f"holdout: {plan.holdout_size:,} bars SEALED\n")
 
-    store = ExperimentStore(root / "research.db") if args.record else None
+    store = ExperimentStore(research_db(root)) if args.record else None
     if store:
         store.register_dataset(dataset.manifest)
 
@@ -313,7 +347,7 @@ def cmd_baselines(args) -> int:
         print(f"\ntake-profit hit rate across every policy: "
               f"{tp_hits / all_trades:.2f}% of {all_trades:,} trades")
     if store:
-        print(f"\nrecorded to {root / 'research.db'}: {store.counts()}")
+        print(f"\nrecorded to {research_db(root)}: {store.counts()}")
         store.close()
     return 0
 
@@ -391,7 +425,7 @@ def cmd_train(args) -> int:
               f"-> {trained.directory}")
 
     if args.record:
-        with ExperimentStore(root / "research.db") as store:
+        with ExperimentStore(research_db(root)) as store:
             store.register_dataset(dataset.manifest)
             for seed, trained in zip(seeds, ensemble):
                 store.register_policy(
@@ -404,7 +438,7 @@ def cmd_train(args) -> int:
                     weights_path=str(trained.weights_path),
                     version=args.version, policy_id=trained.policy_id,
                 )
-        print(f"\n  recorded {len(ensemble)} policies to {root / 'research.db'}")
+        print(f"\n  recorded {len(ensemble)} policies to {research_db(root)}")
     return 0
 
 
@@ -467,7 +501,7 @@ def cmd_evaluate(args) -> int:
     print("\n" + gate.describe())
 
     if args.record:
-        with ExperimentStore(root / "research.db") as store:
+        with ExperimentStore(research_db(root)) as store:
             store.register_dataset(dataset.manifest)
             if store.policy(policy_id) is None:
                 store.register_policy(agent=args.agent, kind="learned", algo="PPO",
@@ -483,14 +517,14 @@ def cmd_evaluate(args) -> int:
                 policy_id=policy_id, dataset_id=dataset.manifest.dataset_id,
                 split_id=plan.split_id, stage=EvaluationStage.WALK_FORWARD,
                 passed=gate.passed, gates=gate.as_dict(), reason=gate.reason())
-        print(f"\nrecorded to {root / 'research.db'}")
+        print(f"\nrecorded to {research_db(root)}")
     return 0 if gate.passed else 2
 
 
 def cmd_agents(args) -> int:
     """Show each agent's bias and how far evidence has moved it."""
     root = Path(args.root)
-    with ExperimentStore(root / "research.db") as store:
+    with ExperimentStore(research_db(root)) as store:
         agents = build_agents(store, names=args.agent)
         for agent in agents:
             print(agent.summary())
@@ -518,7 +552,7 @@ def cmd_campaign(args) -> int:
     dataset = resolve_dataset(root, args.dataset)
     plan = _walk_forward_plan(dataset, args)
 
-    with ExperimentStore(root / "research.db") as store:
+    with ExperimentStore(research_db(root)) as store:
         store.register_dataset(dataset.manifest)
         agents = build_agents(store, seed=args.seed, names=args.agent)
         cache = BaselineCache()
@@ -562,7 +596,7 @@ def cmd_desk(args) -> int:
     plan = _walk_forward_plan(dataset, args)
     seeds = tuple(range(args.seeds))
 
-    with ExperimentStore(root / "research.db") as store:
+    with ExperimentStore(research_db(root)) as store:
         store.register_dataset(dataset.manifest)
         manager = JojoManager(store, allocation=AllocationConfig(
             total_paper_capital=args.capital,
@@ -601,7 +635,7 @@ def cmd_desk(args) -> int:
 
         if args.record:
             manager.record_allocations(manager.allocate(by_agent))
-            print(f"\nallocations recorded to {root / 'research.db'}")
+            print(f"\nallocations recorded to {research_db(root)}")
 
         print("\nPaper capital only. Promotion here is a research status: nothing")
         print("reaches live trading without the three-part gate and your explicit")
@@ -646,7 +680,7 @@ def cmd_ingest(args) -> int:
         print()
 
     if args.record:
-        with ExperimentStore(root / "research.db") as store:
+        with ExperimentStore(research_db(root)) as store:
             ids = record_hypotheses(store, args.agent, proposals)
         print(f"recorded {len(ids)} hypothesis/es for {args.agent} as PROPOSED")
 
@@ -658,7 +692,7 @@ def cmd_ingest(args) -> int:
 
 def cmd_report(args) -> int:
     root = Path(args.root)
-    store = ExperimentStore(root / "research.db")
+    store = ExperimentStore(research_db(root))
     try:
         manifests = [
             m for m in list_datasets(root)
@@ -703,7 +737,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--root", default=str(DEFAULT_ROOT), help="data directory")
+    parser.add_argument("--root", default=str(default_root()),
+                        help="data directory; defaults to config.json's data_dir "
+                             "so the trading server sees what research records")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
 
