@@ -21,7 +21,7 @@ from backend.llm.prompts import SYSTEM_PROMPT, build_prompt
 from backend.llm.schema import TradeStance
 from backend.llm.strategy import LLMStrategy
 from backend.models import (
-    BotConfig, Candle, Position, PositionSide, SignalAction,
+    BotConfig, Candle, Position, PositionSide, Signal, SignalAction,
 )
 from backend.strategies import create_strategy
 from backend.strategies.base import Series
@@ -508,10 +508,12 @@ async def test_confidence_cannot_buy_a_bigger_position(llm_engine):
 def test_confidence_is_structurally_absent_from_sizing():
     """The guard that catches someone wiring conviction into size later.
 
-    The behavioural test above can only observe today's code path. This one
-    fails the moment ``confidence`` becomes something the sizing path can read,
-    which is the change that would quietly break the boundary.
+    Checked against the parsed syntax tree, not the source text: the risk engine
+    is entitled to *say* in a docstring that it ignores confidence, and an
+    earlier version of this test failed the moment it did. What must not exist
+    is code that reads it.
     """
+    import ast
     import inspect
     from pathlib import Path as _Path
 
@@ -520,10 +522,16 @@ def test_confidence_is_structurally_absent_from_sizing():
     params = inspect.signature(RiskEngine.size_position).parameters
     assert "confidence" not in params, "sizing must not take a conviction input"
 
-    risk_src = _Path("backend/risk.py").read_text()
-    assert "confidence" not in risk_src, (
-        "the risk engine now mentions confidence — if conviction can reach "
-        "sizing or the veto, a model can talk its way into a bigger position"
+    tree = ast.parse(_Path("backend/risk.py").read_text())
+    reads = [
+        node for node in ast.walk(tree)
+        if (isinstance(node, ast.Attribute) and node.attr == "confidence")
+        or (isinstance(node, ast.Name) and node.id == "confidence")
+    ]
+    assert not reads, (
+        f"backend/risk.py reads confidence at line(s) "
+        f"{sorted({n.lineno for n in reads})} — if conviction can reach sizing "
+        "or the veto, a model can talk its way into a bigger position"
     )
 
 
@@ -576,3 +584,142 @@ async def test_the_tick_never_waits_on_the_model(llm_engine):
 
     assert elapsed < 1.0, f"tick blocked for {elapsed:.2f}s on a slow model"
     await bot.brain.aclose()
+
+
+# ---------------------------------------------------------------------------
+# the agent's own exit geometry
+# ---------------------------------------------------------------------------
+
+def geometry(stop=None, take=None, *, bot_stop=1.0, bot_take=7.0):
+    from backend.config import load_settings
+    from backend.portfolio import Portfolio
+    from backend.risk import RiskEngine
+
+    settings = load_settings()
+    engine = RiskEngine(settings, Portfolio(10_000.0))
+    config = BotConfig(
+        id="jotaro", name="JOTARO", strategy="llm", symbol="BTC/USDT",
+        stop_loss_pct=bot_stop, take_profit_pct=bot_take,
+    )
+    signal = Signal(
+        bot_id="jotaro", symbol="BTC/USDT", action=SignalAction.LONG,
+        confidence=0.9, stop_distance_pct=stop, take_profit_pct=take,
+    )
+    return engine.exit_geometry(config, signal)
+
+
+def test_a_silent_decider_gets_the_configured_defaults():
+    """Every hand-written strategy names no geometry and must be unaffected."""
+    assert geometry() == (1.0, 7.0)
+
+
+def test_an_agent_that_names_its_own_exits_gets_them():
+    assert geometry(stop=2.5, take=4.0) == (2.5, 4.0)
+
+
+def test_absurd_geometry_is_clamped_to_something_arithmetically_meaningful():
+    from backend.risk import RiskEngine
+
+    tight_stop, _ = geometry(stop=0.0001)
+    wide_stop, _ = geometry(stop=900.0)
+    assert tight_stop == RiskEngine.MIN_STOP_PCT
+    assert wide_stop == RiskEngine.MAX_STOP_PCT
+
+
+def test_a_target_nearer_than_the_stop_is_pushed_out():
+    stop, take = geometry(stop=3.0, take=0.1)
+    assert stop == 3.0
+    assert take >= stop * 0.5
+
+
+def test_choosing_the_stop_cannot_change_money_at_risk():
+    """The reason exit autonomy is safe to hand over.
+
+    Sizing solves ``quantity = risk_budget / (price * stop_distance)``, so the
+    loss taken when the stop hits is the same at every stop distance. A wider
+    stop buys a smaller position, not a bigger loss. If this ever fails, an
+    agent has been handed control of exposure rather than structure.
+    """
+    from backend.config import load_settings
+    from backend.portfolio import Portfolio
+    from backend.risk import RiskEngine
+
+    settings = load_settings()
+    portfolio = Portfolio(10_000.0)
+    engine = RiskEngine(settings, portfolio)
+    config = BotConfig(
+        id="jotaro", name="JOTARO", strategy="llm", symbol="BTC/USDT",
+        allocation=0.2, risk_per_trade=0.02, leverage=5.0,
+    )
+    price = 60_000.0
+
+    losses = []
+    for stop in (0.5, 1.0, 2.0, 5.0, 10.0):
+        decision = engine.size_position(config, price, stop)
+        assert decision.allowed
+        losses.append(decision.quantity * price * stop / 100.0)
+
+    expected = portfolio.equity * config.allocation * config.risk_per_trade
+    for loss in losses:
+        assert loss == pytest.approx(expected, rel=1e-9), (
+            f"risk per trade moved with stop distance: {losses} vs {expected}"
+        )
+
+
+def test_a_very_tight_stop_is_capped_by_margin_not_allowed_to_exceed_risk():
+    """The margin cap can only reduce the position, never enlarge it."""
+    from backend.config import load_settings
+    from backend.portfolio import Portfolio
+    from backend.risk import RiskEngine
+
+    settings = load_settings()
+    portfolio = Portfolio(10_000.0)
+    engine = RiskEngine(settings, portfolio)
+    config = BotConfig(
+        id="jotaro", name="JOTARO", strategy="llm", symbol="BTC/USDT",
+        allocation=0.2, risk_per_trade=0.02, leverage=5.0,
+    )
+    budget = portfolio.equity * config.allocation * config.risk_per_trade
+    decision = engine.size_position(config, 60_000.0, 0.25)
+    loss = decision.quantity * 60_000.0 * 0.0025
+    assert loss <= budget + 1e-9
+
+
+def test_stance_geometry_reaches_the_signal(tmp_path):
+    client = ScriptedDecisionClient(stances=[
+        TradeStance(
+            action=SignalAction.LONG, confidence=0.9, reason="r", thesis="t",
+            invalidation="i", horizon_minutes=60,
+            stop_distance_pct=1.8, take_profit_pct=3.6,
+        )
+    ])
+    brain = brain_with(client, tmp_path)
+    asyncio.run(refresh(brain))
+
+    strategy = LLMStrategy()
+    strategy.bind_brain(brain)
+    signal = strategy.evaluate("jotaro", "BTC/USDT", make_candles(), None)
+    assert signal.stop_distance_pct == pytest.approx(1.8)
+    assert signal.take_profit_pct == pytest.approx(3.6)
+
+
+def test_all_bots_puts_the_whole_roster_on_the_model(settings):
+    from backend.orchestrator import JojoOrchestrator
+
+    settings.provider = "simulated"
+    settings.llm.enabled = True
+    settings.llm.all_bots = True
+
+    async def run():
+        engine = JojoOrchestrator(settings, store=None)
+        await engine.start()
+        try:
+            assert len(engine.bots) == 5
+            for agent in engine.bots.values():
+                assert isinstance(agent.strategy, LLMStrategy), (
+                    f"{agent.name} is not on the model"
+                )
+        finally:
+            await engine.stop()
+
+    asyncio.run(run())

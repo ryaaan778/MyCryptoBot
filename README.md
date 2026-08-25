@@ -86,11 +86,12 @@ Any bot can run on a language model instead of a hand-written strategy. Set its
 // config.json
 "llm": {
   "enabled": true,
+  "all_bots": true,             // put the whole roster on the model
   "model": "claude-opus-5",
   "web_search": true,
   "decide_every_sec": 300,      // per bot — this is what the API bill tracks
   "daily_call_budget": 500,     // per bot, hard stop
-  "min_confidence": 0.5
+  "min_confidence": 0.5         // drop to 0 to act on every stance
 }
 ```
 
@@ -137,6 +138,70 @@ on the API. A stance expires on the horizon the model gave it, capped by
 is worse than no opinion. No live stance reads as HOLD, which is also what a
 missing key, an expired card or a network partition degrades to. A bot that
 cannot reach its model stops trading; it never falls back to guessing.
+
+**Agents choose their own exits.** A stance may name its own stop distance and
+target, not just a direction. This looks like handing over risk control and is
+the opposite: sizing solves `quantity = risk_budget / (price * stop_distance)`,
+so a wider stop buys a *smaller* position and a tighter stop a larger one with
+less room. Money at risk on the trade is identical at every stop distance —
+pinned by `risk_per_trade`, which the agent cannot see or set. The risk engine
+clamps the ask to a band where the arithmetic stays meaningful and nothing else.
+So the agent owns trade *structure* completely, and cannot convert that into
+exposure.
+
+---
+
+## JOJO's capital allocation
+
+JOJO does not trade. It decides how much money each agent gets, and revises it as
+results come in — winners are given more to work with, losers less.
+
+```jsonc
+"allocator": {
+  "enabled": true,
+  "interval_sec": 900,
+  "min_trades_for_conviction": 25,   // trades needed to exceed an even share
+  "floor": 0.05,                     // nobody is starved to zero
+  "ceiling": 0.40,                   // nobody takes the whole desk
+  "smoothing": 0.35                  // move part of the way each round
+}
+```
+
+Allocating in proportion to recent P&L is a well-known way to lose money — you
+buy a streak at its peak and cut an agent right before it recovers. Four things
+stop this from being that, and none of them limits how freely an agent trades:
+
+- **Edge is measured per unit of notional traded**, never against the agent's own
+  budget. Scoring against the budget creates a feedback loop where cutting an
+  agent inflates its apparent edge and wins the money straight back. That bug
+  put the *worst* agent on the desk at the ceiling within a few rounds; there is
+  now a regression test for it.
+- **A short streak cannot capture the desk.** Below `min_trades_for_conviction`
+  an agent is held to an even share no matter how good three trades looked.
+  Shrinkage alone does not handle this: three trades averaging +300 really is a
+  high point estimate. What is missing at n=3 is grounds, not magnitude.
+- **A floor and a ceiling.** An agent on zero capital can never generate the
+  evidence that would win it back — an absorbing state, and how a portfolio
+  quietly becomes one strategy.
+- **Budgets ease toward the target** rather than jumping to each fresh estimate,
+  because allocation computed on noisy samples is itself noisy.
+
+When nobody is profitable, everyone drops to the floor and the rest of the desk
+sits in cash rather than being deployed behind a roster with no demonstrated
+edge. Running all five with a known synthetic edge per agent, budget converges on
+the right one within a few hundred trades:
+
+```
+ round  trades   JONATHAN     JOSEPH     JOTARO     JOLYAN       KIRA
+ start       0     22.0%      20.0%      24.0%      20.0%      14.0%
+     4     100      8.2%       7.8%      11.4%      36.4%      35.4%
+     8     200      6.3%      10.9%      33.2%      10.8%      38.7%
+
+ true edge/trade    -0.6       -1.4       +0.2       -0.3       +2.6
+```
+
+Allocation is a budget, never an instruction. It changes how large an agent's
+positions may be and nothing about what it decides to trade.
 
 This is paper trading. Real-money execution is still behind the unchanged
 three-part gate in **[Paper trading vs. live trading](#paper-trading-vs-live-trading)**.

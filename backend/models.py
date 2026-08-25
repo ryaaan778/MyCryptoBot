@@ -145,6 +145,21 @@ class Signal(BaseModel):
     indicators: dict[str, float] = Field(default_factory=dict)
     ts: int = Field(default_factory=now_ms)
 
+    # A decider may propose its own exit geometry. ``None`` means "use the
+    # bot's configured defaults", which is what every hand-written strategy
+    # does.
+    #
+    # Letting a decider choose its own stop looks like handing over risk
+    # control, and is the opposite. Sizing solves
+    # ``quantity = risk_budget / (price * stop_distance)``, so a wider stop buys
+    # a *smaller* position and a tighter stop a larger one with less room. The
+    # money at risk on the trade is identical either way — it is pinned by
+    # ``risk_per_trade``, which the decider cannot see or set. So this is
+    # genuine autonomy over trade structure that cannot become autonomy over
+    # exposure.
+    stop_distance_pct: float | None = Field(default=None, gt=0.0)
+    take_profit_pct: float | None = Field(default=None, gt=0.0)
+
 
 class Order(BaseModel):
     id: str = Field(default_factory=lambda: new_id("ord"))

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -238,6 +238,10 @@ class LLMSettings(BaseModel):
     """
 
     enabled: bool = False
+    #: Put every bot on the model, overriding each one's configured strategy.
+    #: The five keep their own markets, personas, memories and budgets — this
+    #: only changes what does the deciding.
+    all_bots: bool = False
     provider: str = "anthropic"
     model: str = "claude-opus-5"
     api_key: str = ""                   # blank => read ANTHROPIC_API_KEY
@@ -253,12 +257,39 @@ class LLMSettings(BaseModel):
     timeout_sec: float = 120.0
 
 
+class AllocatorSettings(BaseModel):
+    """JOJO moving capital toward whoever is earning it.
+
+    Off by default: it rewrites bot allocations at runtime, and that should be a
+    decision you make rather than something that starts happening.
+    """
+
+    enabled: bool = False
+    interval_sec: float = 900.0     # how often to re-score the roster
+    prior_trades: int = 20          # shrinkage strength; higher = more patient
+    min_trades_for_conviction: int = 25   # trades needed to exceed an even share
+    floor: float = 0.05             # nobody is starved to zero
+    ceiling: float = 0.40           # nobody takes the whole desk
+    total: float = 1.0              # share of equity available to deploy
+    min_change: float = 0.01        # ignore reshuffles smaller than this
+
+    def to_config(self) -> "AllocatorConfig":
+        from .allocator import AllocatorConfig
+
+        return AllocatorConfig(
+            prior_trades=self.prior_trades,
+            min_trades_for_conviction=self.min_trades_for_conviction,
+            floor=self.floor, ceiling=self.ceiling, total=self.total,
+        )
+
+
 class Settings(BaseModel):
     exchange: ExchangeSettings = Field(default_factory=ExchangeSettings)
     trading: TradingSettings = Field(default_factory=TradingSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    allocator: AllocatorSettings = Field(default_factory=AllocatorSettings)
     strategy_parameters: dict[str, float] = Field(default_factory=dict)
     bots: list[BotConfig] = Field(default_factory=list)
 

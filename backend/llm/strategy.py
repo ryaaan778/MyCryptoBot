@@ -76,6 +76,10 @@ class LLMStrategy(Strategy):
                 "llm_horizon_min": float(stance.horizon_minutes),
                 "llm_sources": float(len(stance.sources)),
             },
+            # The agent's own exit geometry, if it named one. The risk engine
+            # clamps it to a sane band; it cannot change risk per trade.
+            stop_distance_pct=stance.stop_distance_pct,
+            take_profit_pct=stance.take_profit_pct,
         )
 
     @staticmethod

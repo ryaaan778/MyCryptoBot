@@ -65,6 +65,24 @@ class TradeStance(BaseModel):
         default_factory=list,
         description="URLs or dataset names this rests on. Empty if price action only.",
     )
+    stop_distance_pct: float | None = Field(
+        default=None, gt=0.0,
+        description=(
+            "Where your stop belongs, as a percentage move against you. Set it "
+            "where the idea is actually wrong, not where it feels comfortable. "
+            "This does NOT change how much you risk — a wider stop simply buys "
+            "a smaller position for the same risk budget. Leave null to use the "
+            "desk default."
+        ),
+    )
+    take_profit_pct: float | None = Field(
+        default=None, gt=0.0,
+        description=(
+            "Where you would take the trade off, as a percentage move in your "
+            "favour. Be realistic about what the timeframe can deliver: a "
+            "target many ATR away never fills. Leave null for the desk default."
+        ),
+    )
 
     @property
     def actionable(self) -> bool:

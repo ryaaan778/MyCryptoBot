@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 from .config import Settings
-from .models import BotConfig, PositionSide, RiskLevel, RiskState
+from .models import Signal, BotConfig, PositionSide, RiskLevel, RiskState
 from .portfolio import Portfolio
 
 logger = logging.getLogger("jojo.risk")
@@ -39,6 +39,41 @@ class RiskEngine:
         self.emergency_stop = False
         self.halted_bots: set[str] = set()
         self._breaches: list[str] = []
+
+    # ---- exit geometry -----------------------------------------------------
+
+    #: Bounds on a decider-proposed stop, as a percentage of price. These are
+    #: numerical sanity, not a risk budget: a 0.001% stop implies a position
+    #: thousands of times the account and is stopped out by one tick of noise,
+    #: and a 500% stop is not a stop. Money at risk per trade is unaffected by
+    #: where in this band the stop lands.
+    MIN_STOP_PCT = 0.05
+    MAX_STOP_PCT = 25.0
+    #: A take-profit nearer than its stop is almost always a mistake rather
+    #: than an intention, so the floor is expressed relative to the stop.
+    MIN_REWARD_RATIO = 0.5
+    MAX_TAKE_PCT = 500.0
+
+    def exit_geometry(self, bot: BotConfig, signal: "Signal") -> tuple[float, float]:
+        """Resolve the stop and target for a trade, honouring the decider's ask.
+
+        A decider that names its own geometry gets it, clamped to a band that
+        keeps the arithmetic meaningful. One that names nothing — every
+        hand-written strategy — gets the bot's configured defaults, exactly as
+        before.
+
+        This deliberately does *not* consult ``signal.confidence``. Geometry is
+        structure; conviction is not an input to structure any more than it is
+        to size.
+        """
+        stop = signal.stop_distance_pct
+        stop = bot.stop_loss_pct if stop is None or stop <= 0 else stop
+        stop = min(max(float(stop), self.MIN_STOP_PCT), self.MAX_STOP_PCT)
+
+        take = signal.take_profit_pct
+        take = bot.take_profit_pct if take is None or take <= 0 else take
+        take = min(max(float(take), stop * self.MIN_REWARD_RATIO), self.MAX_TAKE_PCT)
+        return stop, take
 
     # ---- sizing ------------------------------------------------------------
 

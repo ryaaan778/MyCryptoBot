@@ -100,9 +100,13 @@ class JojoOrchestrator:
             asyncio.create_task(self._price_worker(), name="price-worker"),
             asyncio.create_task(self._pnl_broadcaster(), name="pnl-broadcaster"),
             asyncio.create_task(self._equity_recorder(), name="equity-recorder"),
+            asyncio.create_task(self._allocation_worker(), name="allocation-worker"),
         ]
 
+        llm = getattr(self.settings, "llm", None)
         for config in self.settings.bots:
+            if llm is not None and llm.enabled and llm.all_bots:
+                config.strategy = "llm"
             agent = BotAgent(config, self)
             self.bots[agent.id] = agent
             if config.enabled:
@@ -246,7 +250,8 @@ class JojoOrchestrator:
         assert self.execution is not None
         bot = agent.config
 
-        sizing = self.risk.size_position(bot, ticker.price, bot.stop_loss_pct)
+        stop_pct, take_pct = self.risk.exit_geometry(bot, signal)
+        sizing = self.risk.size_position(bot, ticker.price, stop_pct)
         if not sizing.allowed:
             self._reject(agent, signal, sizing.reason)
             return None
@@ -280,7 +285,7 @@ class JojoOrchestrator:
             return None
 
         stop_loss, take_profit = self.risk.stop_levels(
-            side, fill.price, bot.stop_loss_pct, bot.take_profit_pct
+            side, fill.price, stop_pct, take_pct
         )
         position = self.portfolio.open_position(
             bot_id=bot.id, symbol=signal.symbol, side=side, fill=fill,
@@ -433,6 +438,93 @@ class JojoOrchestrator:
                 raise
             except Exception:
                 logger.exception("pnl broadcast failed")
+
+    # ---- JOJO's capital allocation -----------------------------------------
+
+    async def _allocation_worker(self) -> None:
+        """Periodically move capital toward whoever is actually earning it."""
+        settings = getattr(self.settings, "allocator", None)
+        if settings is None or not settings.enabled:
+            return
+        while True:
+            await asyncio.sleep(max(30.0, settings.interval_sec))
+            try:
+                self.reallocate()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("reallocation failed")
+
+    def agent_performance(self) -> dict[str, "AgentPerformance"]:
+        """What each agent has actually done, in allocator terms."""
+        from .allocator import AgentPerformance
+
+        equity = self.portfolio.equity
+        even_share = equity / max(len(self.bots), 1)
+        out: dict[str, AgentPerformance] = {}
+        for bot_id in self.bots:
+            total, won, _rate = self.portfolio.bot_win_rate(bot_id)
+            trades = self.portfolio.bot_trades(bot_id)
+            # The scale the results were produced at. Deliberately independent
+            # of the agent's current budget — see AgentPerformance.capital.
+            notional = [abs(t.quantity * t.entry_price) for t in trades]
+            notional = [n for n in notional if n > 0]
+            scale = sum(notional) / len(notional) if notional else even_share
+            out[bot_id] = AgentPerformance(
+                bot_id=bot_id,
+                trades=total,
+                wins=won,
+                realized_pnl=self.portfolio.bot_realized(bot_id),
+                capital=max(scale, 1e-9),
+            )
+        return out
+
+    def reallocate(self) -> list["Allocation"]:
+        """Score every agent and rewrite the allocations. Announces what moved.
+
+        Allocation is a budget, never an instruction: it changes how large an
+        agent's positions may be and nothing about what it decides to trade.
+        """
+        from .allocator import PerformanceAllocator
+
+        settings = getattr(self.settings, "allocator", None)
+        if settings is None:
+            return []
+
+        allocator = PerformanceAllocator(settings.to_config())
+        previous = {bid: agent.config.allocation for bid, agent in self.bots.items()}
+        decisions = allocator.allocate(self.agent_performance(), previous)
+
+        moved = []
+        for decision in decisions:
+            agent = self.bots.get(decision.bot_id)
+            if agent is None:
+                continue
+            if abs(decision.delta) >= settings.min_change:
+                agent.config.allocation = decision.allocation
+                moved.append(decision)
+
+        deployed = sum(d.allocation for d in decisions)
+        self.bus.publish("desk.allocation", {
+            "ts": now_ms(),
+            "deployed": round(deployed, 4),
+            "cash": round(max(0.0, settings.total - deployed), 4),
+            "allocations": [d.as_dict() for d in decisions],
+        })
+
+        for decision in moved:
+            agent = self.bots[decision.bot_id]
+            direction = "raised" if decision.delta > 0 else "cut"
+            self.bus.emit(
+                "desk.allocation",
+                f"JOJO {direction} {agent.name} to "
+                f"{decision.allocation:.0%} of the desk — {decision.reason}",
+                severity="success" if decision.delta > 0 else "warning",
+                bot_id=decision.bot_id,
+                allocation=round(decision.allocation, 4),
+                previous=round(decision.previous, 4),
+            )
+        return decisions
 
     async def _equity_recorder(self) -> None:
         while True:
